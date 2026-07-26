@@ -952,15 +952,27 @@ fn print_service_recipe_list_value(resp: ListRecipesResponse) {
         return;
     }
 
-    for recipe in resp.recipes {
-        println!(
-            "{:<20} {:<9} {} [{}]",
+    println!("{}", format_service_recipe_list(&resp.recipes));
+}
+
+fn format_service_recipe_list(recipes: &[RecipeSummary]) -> String {
+    let catalog = &recipes[0];
+    let mut lines = vec![
+        format!(
+            "Recipe catalog: {} (release {})",
+            catalog.source_label, catalog.release_version
+        ),
+        String::new(),
+    ];
+    lines.extend(recipes.iter().map(|recipe| {
+        format!(
+            "{:<20} {:<9} {}",
             recipe.id,
             recipe_runtime_label(recipe.runtime),
-            recipe.description,
-            recipe.release_version
-        );
-    }
+            recipe.description
+        )
+    }));
+    lines.join("\n")
 }
 
 fn print_service_recipe_detail_value(detail: &RecipeDetail) {
@@ -978,8 +990,8 @@ fn print_recipe_add_review(
     println!("Recipe: {}", summary.id);
     println!("Description: {}", summary.description);
     println!("Runtime: {}", recipe_runtime_label(summary.runtime));
-    println!("Source: {}", summary.source_label);
-    println!("Release: {}", summary.release_version);
+    println!("Recipe catalog: {}", summary.source_label);
+    println!("Catalog release: {}", summary.release_version);
     println!("Service name: {}", service_name);
     println!("Target: {}", target_device_name.unwrap_or("this device"));
     println!(
@@ -1001,8 +1013,8 @@ fn print_recipe_metadata_with_options(detail: &RecipeDetail, include_name: bool)
     println!("Description: {}", summary.description);
     println!("Runtime: {}", recipe_runtime_label(summary.runtime));
     println!("Stability: {}", summary.stability);
-    println!("Source: {}", summary.source_label);
-    println!("Release: {}", summary.release_version);
+    println!("Recipe catalog: {}", summary.source_label);
+    println!("Catalog release: {}", summary.release_version);
     if !detail.tags.is_empty() {
         println!("Tags: {}", detail.tags.join(", "));
     }
@@ -2870,6 +2882,37 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn recipe_list_shows_catalog_release_once() {
+        let recipes = vec![
+            RecipeSummary {
+                id: "code-server".to_string(),
+                name: "code-server".to_string(),
+                description: "Browser-based VS Code.".to_string(),
+                runtime: RecipeRuntimeKind::Docker as i32,
+                stability: "experimental".to_string(),
+                source_label: "enbop/fungi-service-recipes".to_string(),
+                release_version: "v0.5.1".to_string(),
+            },
+            RecipeSummary {
+                id: "webdav".to_string(),
+                name: "WebDAV".to_string(),
+                description: "A WebDAV server.".to_string(),
+                runtime: RecipeRuntimeKind::Wasmtime as i32,
+                stability: "experimental".to_string(),
+                source_label: "enbop/fungi-service-recipes".to_string(),
+                release_version: "v0.5.1".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_service_recipe_list(&recipes),
+            "Recipe catalog: enbop/fungi-service-recipes (release v0.5.1)\n\n\
+code-server          docker    Browser-based VS Code.\n\
+webdav               wasmtime  A WebDAV server."
+        );
+    }
 
     #[test]
     fn remote_log_tail_defaults_and_accepts_bounds() {
