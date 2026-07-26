@@ -559,6 +559,104 @@ fn cli_can_create_and_access_remote_tcp_service() {
     );
 }
 
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows GitHub Actions intermittently cancels short-lived local gRPC CLI connections in two-daemon smoke tests"
+)]
+fn cli_reads_remote_service_logs_with_default_and_explicit_tail() {
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let a_rpc = reserve_port();
+    let b_rpc = reserve_port();
+    let a_swarm = reserve_port();
+    let b_swarm = reserve_port();
+
+    init_fungi_dir(a.path(), a_rpc, a_swarm);
+    init_fungi_dir(b.path(), b_rpc, b_swarm);
+
+    let _daemon_a = start_daemon(a.path());
+    let _daemon_b = start_daemon(b.path());
+
+    let a_peer = wait_peer_id(a.path());
+    let b_peer = wait_peer_id(b.path());
+    let b_addr = format!("/ip4/127.0.0.1/tcp/{b_swarm}/p2p/{b_peer}");
+
+    run_cli(
+        a.path(),
+        [
+            "device",
+            "add",
+            "b",
+            b_peer.as_str(),
+            "--addr",
+            b_addr.as_str(),
+        ],
+    );
+    run_cli(b.path(), ["device", "add", "a", a_peer.as_str()]);
+    run_cli_with_input(b.path(), ["device", "trust", "a"], "y\n");
+
+    let component = b.path().join("remote-log-demo.wasm");
+    std::fs::write(&component, b"test component bytes").unwrap();
+    let manifest = write_wasmtime_service_manifest(a.path(), &component, "remote-log-demo");
+    let manifest_path = manifest.to_string_lossy();
+    run_cli(
+        a.path(),
+        [
+            "service",
+            "apply",
+            "remote-log-demo@b",
+            "--yes",
+            manifest_path.as_ref(),
+        ],
+    );
+
+    let log_path = b
+        .path()
+        .join("runtime/wasmtime/remote-log-demo/runtime.log");
+    let text = (0..210)
+        .map(|line| format!("cli remote log {line:03}\n"))
+        .collect::<String>();
+    std::fs::write(log_path, text).unwrap();
+
+    let output = run_cli(a.path(), ["service", "logs", "remote-log-demo@b"]);
+    assert_eq!(output.stderr, "");
+    assert_eq!(output.stdout.lines().count(), 200);
+    assert!(!output.stdout.contains("cli remote log 009"));
+    assert!(output.stdout.starts_with("cli remote log 010\n"));
+    assert!(output.stdout.ends_with("cli remote log 209\n"));
+
+    let output = run_cli(
+        a.path(),
+        [
+            "service",
+            "--device",
+            "b",
+            "logs",
+            "remote-log-demo",
+            "--tail",
+            "2",
+        ],
+    );
+    assert_eq!(output.stdout, "cli remote log 208\ncli remote log 209\n");
+    assert_eq!(output.stderr, "");
+
+    let output = run_cli_result(
+        a.path(),
+        ["service", "logs", "remote-log-demo@b", "--tail", "2001"],
+        "",
+    );
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, "");
+    assert!(
+        output
+            .stderr
+            .contains("Remote log tail must be between 1 and 2000 lines"),
+        "{}",
+        output.stderr
+    );
+}
+
 fn init_fungi_dir(path: &std::path::Path, rpc_port: u16, swarm_port: u16) {
     run_cli(path, ["init"]);
     assert!(
@@ -630,6 +728,37 @@ publish:
 ---
 
 # dry-run-wasi
+"#,
+            component.display()
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn write_wasmtime_service_manifest(
+    dir: &std::path::Path,
+    component: &std::path::Path,
+    name: &str,
+) -> std::path::PathBuf {
+    let path = dir.join(format!("{name}.fungi.md"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"---
+fungi: service/v1
+id: {name}
+run:
+  provider: wasmtime
+  source:
+    file: {}
+publish:
+  main:
+    tcp:
+      port: 8080
+---
+
+# {name}
 "#,
             component.display()
         ),

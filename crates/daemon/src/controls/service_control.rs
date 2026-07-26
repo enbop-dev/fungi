@@ -19,6 +19,10 @@ use crate::{
 };
 
 const MAX_CONTROL_FRAME_LEN: usize = 2 * 1024 * 1024;
+pub const DEFAULT_REMOTE_SERVICE_LOG_TAIL: usize = 200;
+pub const MAX_REMOTE_SERVICE_LOG_TAIL: usize = 2_000;
+const MAX_REMOTE_SERVICE_LOG_BYTES: usize = 512 * 1024;
+const REMOTE_LOG_TRUNCATION_NOTICE: &str = "[fungi] remote log output truncated\n";
 
 #[derive(Clone)]
 pub struct ServiceControlProtocolControl {
@@ -89,6 +93,23 @@ impl ServiceControlProtocolControl {
         self.send_request(
             peer_id,
             ServiceControlRequest::ListServices { request_id: None },
+        )
+        .await
+    }
+
+    pub async fn get_peer_service_logs(
+        &self,
+        peer_id: PeerId,
+        service: String,
+        tail: usize,
+    ) -> Result<ServiceControlResponse> {
+        self.send_request(
+            peer_id,
+            ServiceControlRequest::GetServiceLogs {
+                request_id: None,
+                service,
+                tail: tail.clamp(1, MAX_REMOTE_SERVICE_LOG_TAIL),
+            },
         )
         .await
     }
@@ -257,6 +278,22 @@ impl ServiceControlProtocolControl {
                     Err(error) => Err(error),
                 }
             }
+            ServiceControlRequest::GetServiceLogs { service, tail, .. } => {
+                let tail = tail.clamp(1, MAX_REMOTE_SERVICE_LOG_TAIL);
+                match self
+                    .runtime_control
+                    .logs_text_by_name_bounded(&service, tail, MAX_REMOTE_SERVICE_LOG_BYTES)
+                    .await
+                {
+                    Ok(logs) => {
+                        match bounded_service_log_response(request_id.clone(), service, logs) {
+                            Ok(response) => return response,
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             ServiceControlRequest::StartService { service, .. } => {
                 match self.runtime_control.start_by_name(&service).await {
                     Ok(()) => match self
@@ -358,6 +395,82 @@ impl ServiceControlProtocolControl {
     }
 }
 
+fn bounded_service_log_response(
+    request_id: Option<String>,
+    service_name: String,
+    logs: crate::runtime::BoundedLogText,
+) -> Result<ServiceControlResponse> {
+    let (content, truncated) = limit_remote_log_content(logs.text, logs.truncated);
+    let response = ServiceControlResponse::success_logs(
+        request_id.clone(),
+        service_name.clone(),
+        render_remote_log_text(&content, truncated),
+    );
+    if serialized_frame_len(&response)? <= MAX_CONTROL_FRAME_LEN {
+        return Ok(response);
+    }
+
+    let mut boundaries = content
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    boundaries.push(content.len());
+    let mut low = 0;
+    let mut high = boundaries.len() - 1;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let candidate = ServiceControlResponse::success_logs(
+            request_id.clone(),
+            service_name.clone(),
+            render_remote_log_text(&content[boundaries[middle]..], true),
+        );
+        if serialized_frame_len(&candidate)? <= MAX_CONTROL_FRAME_LEN {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+
+    let response = ServiceControlResponse::success_logs(
+        request_id,
+        service_name,
+        render_remote_log_text(&content[boundaries[low]..], true),
+    );
+    if serialized_frame_len(&response)? > MAX_CONTROL_FRAME_LEN {
+        anyhow::bail!("Service-control log response cannot fit within the frame limit");
+    }
+    Ok(response)
+}
+
+fn limit_remote_log_content(mut text: String, mut truncated: bool) -> (String, bool) {
+    let initial_budget =
+        MAX_REMOTE_SERVICE_LOG_BYTES - usize::from(truncated) * REMOTE_LOG_TRUNCATION_NOTICE.len();
+    if text.len() > initial_budget {
+        truncated = true;
+        let content_budget = MAX_REMOTE_SERVICE_LOG_BYTES - REMOTE_LOG_TRUNCATION_NOTICE.len();
+        let mut start = text.len() - content_budget;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text = text[start..].to_string();
+    }
+    (text, truncated)
+}
+
+fn render_remote_log_text(content: &str, truncated: bool) -> String {
+    if truncated {
+        format!("{REMOTE_LOG_TRUNCATION_NOTICE}{content}")
+    } else {
+        content.to_string()
+    }
+}
+
+fn serialized_frame_len(value: &impl Serialize) -> Result<usize> {
+    serde_json::to_vec(value)
+        .map(|payload| payload.len())
+        .map_err(|e| anyhow::anyhow!("Failed to serialize service-control frame: {e}"))
+}
+
 async fn write_frame<S, T>(stream: &mut S, value: &T) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -365,6 +478,13 @@ where
 {
     let payload = serde_json::to_vec(value)
         .map_err(|e| anyhow::anyhow!("Failed to serialize service-control frame: {e}"))?;
+    if payload.len() > MAX_CONTROL_FRAME_LEN {
+        anyhow::bail!(
+            "Service-control frame too large: {} bytes (max {})",
+            payload.len(),
+            MAX_CONTROL_FRAME_LEN
+        );
+    }
     let payload_len = u32::try_from(payload.len())
         .map_err(|_| anyhow::anyhow!("Service-control frame is too large"))?;
 
@@ -409,4 +529,72 @@ where
         .map_err(|e| anyhow::anyhow!("Failed to read frame payload: {e}"))?;
     serde_json::from_slice(&payload)
         .map_err(|e| anyhow::anyhow!("Failed to decode service-control frame: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_log_text_is_limited_from_the_front_at_a_character_boundary() {
+        let logs = crate::runtime::BoundedLogText {
+            text: format!("discarded\n{}", "界".repeat(MAX_REMOTE_SERVICE_LOG_BYTES)),
+            truncated: false,
+        };
+
+        let response = bounded_service_log_response(None, "demo".to_string(), logs).unwrap();
+        let limited = response.logs_text.unwrap();
+
+        assert!(limited.starts_with(REMOTE_LOG_TRUNCATION_NOTICE));
+        assert!(limited.ends_with('界'));
+        assert!(limited.len() <= MAX_REMOTE_SERVICE_LOG_BYTES);
+    }
+
+    #[test]
+    fn short_remote_log_text_is_unchanged() {
+        let response = bounded_service_log_response(
+            None,
+            "demo".to_string(),
+            crate::runtime::BoundedLogText {
+                text: "hello\n".to_string(),
+                truncated: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(response.logs_text.as_deref(), Some("hello\n"));
+    }
+
+    #[test]
+    fn control_heavy_remote_logs_fit_the_serialized_frame_limit() {
+        let response = bounded_service_log_response(
+            Some("request".to_string()),
+            "demo".to_string(),
+            crate::runtime::BoundedLogText {
+                text: "\0".repeat(MAX_REMOTE_SERVICE_LOG_BYTES),
+                truncated: false,
+            },
+        )
+        .unwrap();
+        let payload = serde_json::to_vec(&response).unwrap();
+
+        assert!(payload.len() <= MAX_CONTROL_FRAME_LEN);
+        assert!(
+            response
+                .logs_text
+                .as_deref()
+                .unwrap()
+                .starts_with(REMOTE_LOG_TRUNCATION_NOTICE)
+        );
+    }
+
+    #[tokio::test]
+    async fn write_frame_rejects_oversized_outgoing_payloads() {
+        let mut stream = futures::io::Cursor::new(Vec::new());
+        let oversized = "\0".repeat(MAX_CONTROL_FRAME_LEN);
+
+        let error = write_frame(&mut stream, &oversized).await.unwrap_err();
+
+        assert!(error.to_string().contains("frame too large"));
+        assert!(stream.into_inner().is_empty());
+    }
 }

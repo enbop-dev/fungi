@@ -386,6 +386,35 @@ impl RuntimeControl {
         self.logs(runtime, name, options).await
     }
 
+    pub(crate) async fn logs_text_by_name_bounded(
+        &self,
+        name: &str,
+        tail: usize,
+        max_bytes: usize,
+    ) -> Result<BoundedLogText> {
+        let runtime = self.resolve_runtime(name)?;
+        self.ensure_runtime_enabled(runtime)?;
+        self.ensure_runtime_service(runtime, name).await?;
+        match runtime {
+            RuntimeKind::Docker => {
+                let logs = self
+                    .docker_provider()?
+                    .logs(
+                        &self.docker_runtime_handle_or_name(name),
+                        &ServiceLogsOptions {
+                            tail: Some(tail.to_string()),
+                        },
+                    )
+                    .await?;
+                Ok(super::providers::limit_text_bytes_from_end(
+                    logs.text, max_bytes,
+                ))
+            }
+            RuntimeKind::Wasmtime => self.wasmtime.logs_text_bounded(name, tail, max_bytes),
+            RuntimeKind::External => bail!("external TCP services do not have runtime logs"),
+        }
+    }
+
     pub async fn list_published_device_services(&self) -> Result<Vec<DeviceService>> {
         let manifests = self
             .service_manifests

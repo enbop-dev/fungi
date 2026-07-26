@@ -39,6 +39,7 @@
 
 use std::{
     net::TcpListener,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -223,6 +224,11 @@ impl TestDaemon {
     /// Borrow the inner daemon for calling any daemon API directly.
     pub fn daemon(&self) -> &FungiDaemon {
         &self.inner
+    }
+
+    /// Return the isolated Fungi home used by this daemon.
+    pub fn fungi_dir(&self) -> &Path {
+        self._dir.path()
     }
 
     /// Borrow the underlying [`fungi_swarm::SwarmControl`].

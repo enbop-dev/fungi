@@ -143,6 +143,10 @@ service FungiDaemon {
   rpc RemoteStartService(RemoteServiceNameRequest)
   returns (RemoteServiceControlResponse) {}
 
+    // Gets bounded logs for a service on a remote peer.
+  rpc RemoteGetServiceLogs(RemoteGetServiceLogsRequest)
+  returns (ServiceLogsResponse) {}
+
     // Stops a service on a remote peer by service name.
   rpc RemoteStopService(RemoteServiceNameRequest)
   returns (RemoteServiceControlResponse) {}
@@ -515,6 +519,12 @@ message RemotePullServiceRequest {
 message RemoteServiceNameRequest {
   string peer_id = 1;
   string name    = 2;
+}
+
+message RemoteGetServiceLogsRequest {
+  string peer_id = 1;
+  string name    = 2;
+  uint32 tail    = 3;
 }
 
 message RemotePeerRequest { string peer_id = 1; }

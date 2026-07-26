@@ -554,6 +554,15 @@ pub struct RemoteServiceNameRequest {
     pub name: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoteGetServiceLogsRequest {
+    #[prost(string, tag = "1")]
+    pub peer_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub tail: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RemotePeerRequest {
     #[prost(string, tag = "1")]
     pub peer_id: ::prost::alloc::string::String,
@@ -1505,6 +1514,26 @@ pub mod fungi_daemon_client {
             ));
             self.inner.unary(req, path, codec).await
         }
+        /// Gets bounded logs for a service on a remote peer.
+        pub async fn remote_get_service_logs(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemoteGetServiceLogsRequest>,
+        ) -> std::result::Result<tonic::Response<super::ServiceLogsResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/fungi_daemon.FungiDaemon/RemoteGetServiceLogs",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "fungi_daemon.FungiDaemon",
+                "RemoteGetServiceLogs",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
         /// Stops a service on a remote peer by service name.
         pub async fn remote_stop_service(
             &mut self,
@@ -1900,6 +1929,11 @@ pub mod fungi_daemon_server {
             &self,
             request: tonic::Request<super::RemoteServiceNameRequest>,
         ) -> std::result::Result<tonic::Response<super::RemoteServiceControlResponse>, tonic::Status>;
+        /// Gets bounded logs for a service on a remote peer.
+        async fn remote_get_service_logs(
+            &self,
+            request: tonic::Request<super::RemoteGetServiceLogsRequest>,
+        ) -> std::result::Result<tonic::Response<super::ServiceLogsResponse>, tonic::Status>;
         /// Stops a service on a remote peer by service name.
         async fn remote_stop_service(
             &self,
@@ -3621,6 +3655,48 @@ pub mod fungi_daemon_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RemoteStartServiceSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/fungi_daemon.FungiDaemon/RemoteGetServiceLogs" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemoteGetServiceLogsSvc<T: FungiDaemon>(pub Arc<T>);
+                    impl<T: FungiDaemon>
+                        tonic::server::UnaryService<super::RemoteGetServiceLogsRequest>
+                        for RemoteGetServiceLogsSvc<T>
+                    {
+                        type Response = super::ServiceLogsResponse;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemoteGetServiceLogsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as FungiDaemon>::remote_get_service_logs(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemoteGetServiceLogsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

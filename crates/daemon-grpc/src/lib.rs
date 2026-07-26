@@ -1114,6 +1114,26 @@ impl FungiDaemon for FungiDaemonRpcImpl {
         }))
     }
 
+    async fn remote_get_service_logs(
+        &self,
+        request: Request<RemoteGetServiceLogsRequest>,
+    ) -> Result<Response<ServiceLogsResponse>, Status> {
+        let req = request.into_inner();
+        let peer_id = PeerId::from_str(&req.peer_id)
+            .map_err(|e| Status::invalid_argument(format!("Invalid peer_id: {e}")))?;
+        let tail = (req.tail != 0).then_some(req.tail as usize);
+        let logs = self
+            .inner
+            .remote_get_service_logs(peer_id, req.name, tail)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get remote service logs: {e}")))?;
+
+        Ok(Response::new(ServiceLogsResponse {
+            raw: logs.raw,
+            text: logs.text,
+        }))
+    }
+
     async fn remote_stop_service(
         &self,
         request: Request<RemoteServiceNameRequest>,

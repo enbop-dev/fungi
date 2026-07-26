@@ -10,6 +10,11 @@ pub enum ServiceControlRequest {
     ListServices {
         request_id: Option<String>,
     },
+    GetServiceLogs {
+        request_id: Option<String>,
+        service: String,
+        tail: usize,
+    },
     StartService {
         request_id: Option<String>,
         service: String,
@@ -29,6 +34,7 @@ impl ServiceControlRequest {
         match self {
             Self::PullService { request_id, .. }
             | Self::ListServices { request_id, .. }
+            | Self::GetServiceLogs { request_id, .. }
             | Self::StartService { request_id, .. }
             | Self::StopService { request_id, .. }
             | Self::RemoveService { request_id, .. } => request_id.as_deref(),
@@ -39,7 +45,8 @@ impl ServiceControlRequest {
         match self {
             Self::PullService { .. } => None,
             Self::ListServices { .. } => None,
-            Self::StartService { service, .. }
+            Self::GetServiceLogs { service, .. }
+            | Self::StartService { service, .. }
             | Self::StopService { service, .. }
             | Self::RemoveService { service, .. } => Some(service.clone()),
         }
@@ -56,6 +63,8 @@ pub struct ServiceControlResponse {
     pub service: Option<ServiceControlServiceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub services_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ServiceControlError>,
 }
@@ -68,6 +77,7 @@ impl ServiceControlResponse {
             forgotten_locally: false,
             service: Some(ServiceControlServiceRef { name: service_name }),
             services_json: None,
+            logs_text: None,
             error: None,
         }
     }
@@ -79,6 +89,7 @@ impl ServiceControlResponse {
             forgotten_locally: true,
             service: Some(ServiceControlServiceRef { name: service_name }),
             services_json: None,
+            logs_text: None,
             error: None,
         }
     }
@@ -90,6 +101,19 @@ impl ServiceControlResponse {
             forgotten_locally: false,
             service: None,
             services_json: Some(services_json),
+            logs_text: None,
+            error: None,
+        }
+    }
+
+    pub fn success_logs(request_id: Option<String>, service_name: String, text: String) -> Self {
+        Self {
+            request_id,
+            ok: true,
+            forgotten_locally: false,
+            service: Some(ServiceControlServiceRef { name: service_name }),
+            services_json: None,
+            logs_text: Some(text),
             error: None,
         }
     }
@@ -101,6 +125,7 @@ impl ServiceControlResponse {
             forgotten_locally: false,
             service: None,
             services_json: None,
+            logs_text: None,
             error: Some(ServiceControlError {
                 code: code.to_string(),
                 message,

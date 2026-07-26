@@ -586,6 +586,28 @@ impl FungiDaemon {
         ))
     }
 
+    pub async fn remote_get_service_logs(
+        &self,
+        peer_id: PeerId,
+        name: String,
+        tail: Option<usize>,
+    ) -> Result<ServiceLogs> {
+        let tail = tail
+            .unwrap_or(crate::DEFAULT_REMOTE_SERVICE_LOG_TAIL)
+            .clamp(1, crate::MAX_REMOTE_SERVICE_LOG_TAIL);
+        let response = self
+            .service_control_protocol_control()
+            .get_peer_service_logs(peer_id, name, tail)
+            .await?;
+        let text = response
+            .logs_text
+            .ok_or_else(|| anyhow::anyhow!("remote service log response did not include logs"))?;
+        Ok(ServiceLogs {
+            raw: Vec::new(),
+            text,
+        })
+    }
+
     pub async fn remote_stop_service(
         &self,
         peer_id: PeerId,

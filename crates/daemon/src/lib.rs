@@ -16,6 +16,7 @@ pub mod test_support;
 
 pub use api::{ServiceAccess, ServiceAccessEndpoint};
 use clap::Parser;
+pub use controls::{DEFAULT_REMOTE_SERVICE_LOG_TAIL, MAX_REMOTE_SERVICE_LOG_TAIL};
 pub use daemon::FungiDaemon;
 pub use node_capabilities::{
     LocalRuntimeAvailability, LocalRuntimeStatus, NodeCapabilities, NodeRuntimeCapabilities,

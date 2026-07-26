@@ -5,7 +5,8 @@ use std::process::Command;
 use clap::{Args, Subcommand};
 use fungi_config::{FungiDir, devices::LOCAL_DEVICE_NAME, paths::FungiPaths};
 use fungi_daemon::{
-    DeviceService, DeviceServiceSnapshot, RuntimeKind, ServiceAccess, ServiceExposeUsageKind,
+    DEFAULT_REMOTE_SERVICE_LOG_TAIL, DeviceService, DeviceServiceSnapshot,
+    MAX_REMOTE_SERVICE_LOG_TAIL, RuntimeKind, ServiceAccess, ServiceExposeUsageKind,
     ServiceInstance, ServicePhase, ServicePortProtocol, ServiceStatus, parse_service_manifest_yaml,
     service_manifest_with_instance_name,
 };
@@ -16,8 +17,9 @@ use fungi_daemon_grpc::{
         DeviceServiceSnapshotRequest, Empty, GetRecipeRequest, GetServiceLogsRequest,
         ListRecipesRequest, ListRecipesResponse, ListServiceAccessesRequest, ListServicesResponse,
         PullServiceRequest, RecipeDetail, RecipeRuntimeKind, RecipeSummary,
-        RemotePullServiceRequest, RemoteServiceControlResponse, RemoteServiceNameRequest,
-        ResolveRecipeRequest, ServiceInstanceResponse, ServiceNameRequest,
+        RemoteGetServiceLogsRequest, RemotePullServiceRequest, RemoteServiceControlResponse,
+        RemoteServiceNameRequest, ResolveRecipeRequest, ServiceInstanceResponse,
+        ServiceNameRequest,
     },
 };
 use serde::Serialize;
@@ -123,11 +125,12 @@ pub enum ServiceCommands {
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
     },
-    /// Get local service logs by name
+    /// Get service logs by name
     Logs {
         name: String,
+        /// Return only the last N lines (remote default: 200; remote maximum: 2000)
         #[arg(long)]
-        tail: Option<String>,
+        tail: Option<usize>,
     },
     /// Remove a service
     Remove {
@@ -336,20 +339,30 @@ pub async fn execute_service(args: CommonArgs, service_args: ServiceArgs) {
             }
         }
         ServiceCommands::Logs { name, tail } => {
-            if device.is_some() {
-                fatal("Remote service logs are not implemented yet")
-            }
-            let req = GetServiceLogsRequest {
-                runtime: 0,
-                name,
-                tail: tail.unwrap_or_default(),
-            };
-            match client.get_service_logs(Request::new(req)).await {
-                Ok(resp) => {
-                    let logs = resp.into_inner();
-                    print!("{}", logs.text);
+            let target = parse_service_reference(name);
+            reject_service_entry(&target, "logs");
+            let device = resolve_service_device_target(&args, device, target.device);
+            if let Some(device) = device {
+                let tail = resolve_remote_log_tail(tail).unwrap_or_else(|error| fatal(error));
+                let req = RemoteGetServiceLogsRequest {
+                    peer_id: device.peer_id,
+                    name: target.name,
+                    tail: tail as u32,
+                };
+                match client.remote_get_service_logs(Request::new(req)).await {
+                    Ok(resp) => print!("{}", resp.into_inner().text),
+                    Err(error) => fatal_remote_device_grpc(error),
                 }
-                Err(e) => fatal_grpc(e),
+            } else {
+                let req = GetServiceLogsRequest {
+                    runtime: 0,
+                    name: target.name,
+                    tail: tail.map(|tail| tail.to_string()).unwrap_or_default(),
+                };
+                match client.get_service_logs(Request::new(req)).await {
+                    Ok(resp) => print!("{}", resp.into_inner().text),
+                    Err(error) => fatal_grpc(error),
+                }
             }
         }
         ServiceCommands::Stop { name } => {
@@ -549,6 +562,16 @@ pub async fn execute_service(args: CommonArgs, service_args: ServiceArgs) {
             }
         }
     }
+}
+
+fn resolve_remote_log_tail(tail: Option<usize>) -> Result<usize, String> {
+    let tail = tail.unwrap_or(DEFAULT_REMOTE_SERVICE_LOG_TAIL);
+    if !(1..=MAX_REMOTE_SERVICE_LOG_TAIL).contains(&tail) {
+        return Err(format!(
+            "Remote log tail must be between 1 and {MAX_REMOTE_SERVICE_LOG_TAIL} lines"
+        ));
+    }
+    Ok(tail)
 }
 
 fn validate_service_command_before_connect(command: &ServiceCommands) {
@@ -2847,6 +2870,30 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn remote_log_tail_defaults_and_accepts_bounds() {
+        assert_eq!(
+            resolve_remote_log_tail(None),
+            Ok(DEFAULT_REMOTE_SERVICE_LOG_TAIL)
+        );
+        assert_eq!(resolve_remote_log_tail(Some(1)), Ok(1));
+        assert_eq!(
+            resolve_remote_log_tail(Some(MAX_REMOTE_SERVICE_LOG_TAIL)),
+            Ok(MAX_REMOTE_SERVICE_LOG_TAIL)
+        );
+    }
+
+    #[test]
+    fn remote_log_tail_rejects_zero_and_values_over_limit() {
+        let expected =
+            format!("Remote log tail must be between 1 and {MAX_REMOTE_SERVICE_LOG_TAIL} lines");
+        assert_eq!(resolve_remote_log_tail(Some(0)), Err(expected.clone()));
+        assert_eq!(
+            resolve_remote_log_tail(Some(MAX_REMOTE_SERVICE_LOG_TAIL + 1)),
+            Err(expected)
+        );
+    }
 
     #[test]
     fn select_access_endpoint_prefers_requested_entry() {

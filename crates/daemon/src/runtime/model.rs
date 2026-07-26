@@ -284,3 +284,9 @@ pub struct ServiceLogs {
     pub raw: Vec<u8>,
     pub text: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedLogText {
+    pub(crate) text: String,
+    pub(crate) truncated: bool,
+}
