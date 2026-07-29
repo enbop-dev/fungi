@@ -27,7 +27,10 @@ use serde::Serialize;
 use crate::commands::CommonArgs;
 
 use super::{
-    client::get_rpc_client,
+    client::{
+        DEFAULT_RPC_REQUEST_TIMEOUT, LONG_RPC_REQUEST_TIMEOUT, get_rpc_client,
+        get_rpc_client_with_timeout,
+    },
     shared::{
         DeviceInput, OptionalDeviceTargetArg, fatal, fatal_grpc, print_target_device,
         resolve_optional_device,
@@ -177,7 +180,8 @@ pub async fn execute_service(args: CommonArgs, service_args: ServiceArgs) {
         });
     validate_service_command_before_connect(&command);
 
-    let mut client = match get_rpc_client(&args).await {
+    let request_timeout = service_request_timeout(&command);
+    let mut client = match get_rpc_client_with_timeout(&args, request_timeout).await {
         Some(c) => c,
         None => fatal("Cannot connect to Fungi daemon. Is it running?"),
     };
@@ -561,6 +565,13 @@ pub async fn execute_service(args: CommonArgs, service_args: ServiceArgs) {
                 Err(error) => fatal_grpc(error),
             }
         }
+    }
+}
+
+fn service_request_timeout(command: &ServiceCommands) -> std::time::Duration {
+    match command {
+        ServiceCommands::Apply { .. } | ServiceCommands::Pull { .. } => LONG_RPC_REQUEST_TIMEOUT,
+        _ => DEFAULT_RPC_REQUEST_TIMEOUT,
     }
 }
 
@@ -2882,6 +2893,36 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn service_apply_and_pull_use_long_rpc_timeout() {
+        let apply = ServiceCommands::Apply {
+            target: None,
+            manifest: None,
+            recipe: None,
+            create: false,
+            refresh: false,
+            dry_run: false,
+            start: false,
+            yes: false,
+        };
+        let pull = ServiceCommands::Pull {
+            manifest: "service.fungi.md".to_string(),
+        };
+
+        assert_eq!(service_request_timeout(&apply), LONG_RPC_REQUEST_TIMEOUT);
+        assert_eq!(service_request_timeout(&pull), LONG_RPC_REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn ordinary_service_commands_use_default_rpc_timeout() {
+        let list = ServiceCommands::List {
+            verbose: false,
+            refresh: false,
+        };
+
+        assert_eq!(service_request_timeout(&list), DEFAULT_RPC_REQUEST_TIMEOUT);
+    }
 
     #[test]
     fn recipe_list_shows_catalog_release_once() {

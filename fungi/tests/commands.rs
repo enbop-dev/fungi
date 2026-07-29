@@ -1,10 +1,11 @@
 use clap::{CommandFactory, Parser};
 use fungi::commands::{
-    Commands, FungiArgs,
+    Commands, DEFAULT_PING_COUNT, FungiArgs,
     fungi_control::{
         DeviceAddressCommands, DeviceCommands, DeviceInput, ServiceArgs, ServiceCommands,
         ServiceRecipeCommands,
     },
+    resolve_ping_count,
 };
 
 #[test]
@@ -68,6 +69,53 @@ fn parses_migrate_command() {
     let Commands::Migrate(_) = args.command else {
         panic!("expected migrate command");
     };
+}
+
+#[test]
+fn ping_defaults_to_finite_mode() {
+    let args = FungiArgs::try_parse_from(["fungi", "ping", "nas"]).unwrap();
+
+    let Commands::Ping { count, watch, .. } = args.command else {
+        panic!("expected ping command");
+    };
+
+    assert!(count.is_none());
+    assert!(!watch);
+    assert_eq!(resolve_ping_count(count, watch), DEFAULT_PING_COUNT);
+}
+
+#[test]
+fn parses_ping_count() {
+    let args = FungiArgs::try_parse_from(["fungi", "ping", "nas", "--count", "2"]).unwrap();
+
+    let Commands::Ping { count, watch, .. } = args.command else {
+        panic!("expected ping command");
+    };
+
+    assert_eq!(count.map(|count| count.get()), Some(2));
+    assert!(!watch);
+    assert_eq!(resolve_ping_count(count, watch), 2);
+}
+
+#[test]
+fn parses_continuous_ping_watch_mode() {
+    let args = FungiArgs::try_parse_from(["fungi", "ping", "nas", "--watch"]).unwrap();
+
+    let Commands::Ping { count, watch, .. } = args.command else {
+        panic!("expected ping command");
+    };
+
+    assert!(count.is_none());
+    assert!(watch);
+    assert_eq!(resolve_ping_count(count, watch), 0);
+}
+
+#[test]
+fn rejects_invalid_ping_count_combinations() {
+    assert!(FungiArgs::try_parse_from(["fungi", "ping", "nas", "--count", "0"]).is_err());
+    assert!(
+        FungiArgs::try_parse_from(["fungi", "ping", "nas", "--count", "2", "--watch"]).is_err()
+    );
 }
 
 #[test]

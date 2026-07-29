@@ -13,7 +13,17 @@ use super::{
     },
 };
 
-pub async fn execute_ping(args: CommonArgs, peer: PeerInput, interval_ms: u32, verbose: bool) {
+fn ping_count_exceeded(count: u32, tick_seq: u64) -> bool {
+    count > 0 && tick_seq > u64::from(count)
+}
+
+pub async fn execute_ping(
+    args: CommonArgs,
+    peer: PeerInput,
+    interval_ms: u32,
+    count: u32,
+    verbose: bool,
+) {
     let mut client = match get_rpc_client(&args).await {
         Some(c) => c,
         None => fatal("Cannot connect to Fungi daemon. Is it running?"),
@@ -28,6 +38,7 @@ pub async fn execute_ping(args: CommonArgs, peer: PeerInput, interval_ms: u32, v
     let req = PingPeerRequest {
         peer_id: resolved.peer_id.clone(),
         interval_ms,
+        count,
     };
 
     let response = match client.ping_peer(Request::new(req)).await {
@@ -36,15 +47,22 @@ pub async fn execute_ping(args: CommonArgs, peer: PeerInput, interval_ms: u32, v
     };
 
     let mut stream = response.into_inner();
-    println!(
-        "Ping stream peer={} interval={}ms (Ctrl+C to stop)",
-        if verbose {
-            resolved.peer_id.clone()
-        } else {
-            shorten_peer_id(&resolved.peer_id)
-        },
-        interval_ms
-    );
+    let peer_label = if verbose {
+        resolved.peer_id.clone()
+    } else {
+        shorten_peer_id(&resolved.peer_id)
+    };
+    if count == 0 {
+        println!(
+            "Ping stream peer={} interval={}ms (Ctrl+C to stop)",
+            peer_label, interval_ms
+        );
+    } else {
+        println!(
+            "Ping peer={} count={} interval={}ms",
+            peer_label, count, interval_ms
+        );
+    }
 
     if !verbose {
         println!(
@@ -53,7 +71,17 @@ pub async fn execute_ping(args: CommonArgs, peer: PeerInput, interval_ms: u32, v
         );
     }
 
-    while let Ok(Some(event)) = stream.message().await {
+    loop {
+        let event = match stream.message().await {
+            Ok(Some(event)) => event,
+            Ok(None) => break,
+            Err(error) => fatal_grpc(error),
+        };
+        // Older daemons ignore the count field and keep streaming. Waiting for
+        // the next tick preserves every result from the requested final round.
+        if ping_count_exceeded(count, event.tick_seq) {
+            break;
+        }
         match event.event {
             Some(ping_peer_event::Event::Connecting(_)) => {
                 if verbose {
@@ -166,5 +194,25 @@ pub async fn execute_ping(args: CommonArgs, peer: PeerInput, interval_ms: u32, v
                 }
             }
         }
+    }
+
+    if count > 0 {
+        println!("Ping completed: {count} rounds");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ping_count_exceeded;
+
+    #[test]
+    fn finite_client_accepts_every_requested_round() {
+        assert!(!ping_count_exceeded(4, 4));
+        assert!(ping_count_exceeded(4, 5));
+    }
+
+    #[test]
+    fn watch_mode_never_stops_for_a_tick_count() {
+        assert!(!ping_count_exceeded(0, u64::MAX));
     }
 }
