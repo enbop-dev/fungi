@@ -62,6 +62,23 @@ fn ping_count_reached(count: u32, tick_seq: u64) -> bool {
     count > 0 && tick_seq >= u64::from(count)
 }
 
+async fn send_idle_ping_event(
+    tx: &mpsc::Sender<Result<PingPeerEvent, Status>>,
+    peer_id: &str,
+    tick_seq: u64,
+    ts_unix_ms: i64,
+    count: u32,
+) -> Result<bool, PingEventSendError> {
+    tx.send(Ok(ping_event(
+        peer_id,
+        tick_seq,
+        ts_unix_ms,
+        ping_peer_event::Event::Idle(PingPeerIdle {}),
+    )))
+    .await?;
+    Ok(ping_count_reached(count, tick_seq))
+}
+
 fn proto_runtime_kind(kind: i32) -> Result<Option<fungi_daemon::RuntimeKind>, Status> {
     match ServiceRuntimeKind::try_from(kind) {
         Ok(ServiceRuntimeKind::Unspecified) => Ok(None),
@@ -548,13 +565,9 @@ impl FungiDaemon for FungiDaemonRpcImpl {
                 let ts_unix_ms = now_unix_ms();
 
                 let Some(peer_connections) = daemon.get_peer_connections(peer_id) else {
-                    tx.send(Ok(ping_event(
-                        &peer_id_str,
-                        tick_seq,
-                        ts_unix_ms,
-                        ping_peer_event::Event::Idle(PingPeerIdle {}),
-                    )))
-                    .await?;
+                    if send_idle_ping_event(&tx, &peer_id_str, tick_seq, ts_unix_ms, count).await? {
+                        break;
+                    }
                     continue;
                 };
 
@@ -1418,6 +1431,20 @@ mod tests {
         assert!(!ping_count_reached(4, 3));
         assert!(ping_count_reached(4, 4));
         assert!(ping_count_reached(4, 5));
+    }
+
+    #[tokio::test]
+    async fn finite_idle_ping_stops_after_requested_round() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(
+            send_idle_ping_event(&tx, "device", 4, 123, 4)
+                .await
+                .unwrap()
+        );
+        let event = rx.recv().await.unwrap().unwrap();
+        assert_eq!(event.tick_seq, 4);
+        assert!(matches!(event.event, Some(ping_peer_event::Event::Idle(_))));
     }
 
     #[test]
