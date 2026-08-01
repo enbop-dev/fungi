@@ -75,7 +75,7 @@ service FungiDaemon {
   // Removes a user-managed device.
   rpc RemoveDevice(RemoveDeviceRequest) returns (Empty) {}
 
-  // Continuously pings all active connections to a peer and streams results.
+  // Pings all active connections to a peer and streams each round's results.
   rpc PingPeer(PingPeerRequest) returns (stream PingPeerEvent) {}
 
   // Lists currently established connections with latest ping metadata.
@@ -275,6 +275,8 @@ message RemoveDeviceRequest { string peer_id = 1; }
 message PingPeerRequest {
   string peer_id     = 1;
   uint32 interval_ms = 2;
+  // Number of ping rounds to run. Zero keeps streaming until the client disconnects.
+  uint32 count       = 3;
 }
 
 message PingPeerEvent {

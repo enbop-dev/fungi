@@ -37,8 +37,16 @@ fn main() -> Result<()> {
         Commands::Ping {
             peer,
             interval_ms,
+            count,
+            watch,
             verbose,
-        } => block_on(execute_ping(fungi_args.common, peer, interval_ms, verbose)),
+        } => block_on(execute_ping(
+            fungi_args.common,
+            peer,
+            interval_ms,
+            resolve_ping_count(count, watch),
+            verbose,
+        )),
         Commands::Dynamic(tokens) => block_on(execute_dynamic_service(fungi_args.common, tokens)),
     }
 

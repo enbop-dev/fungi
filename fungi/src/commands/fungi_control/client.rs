@@ -7,6 +7,11 @@ use crate::commands::CommonArgs;
 
 use super::shared::fatal;
 
+pub(super) const DEFAULT_RPC_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+pub(super) const LONG_RPC_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(300);
+
 pub(super) fn read_rpc_endpoint(fungi_dir: &std::path::Path) -> anyhow::Result<String> {
     fungi_config::read_daemon_endpoint(fungi_dir)
 }
@@ -21,8 +26,25 @@ pub(super) fn rpc_address_from_endpoint(endpoint: &str) -> anyhow::Result<String
     Ok(address.to_string())
 }
 
+fn rpc_endpoint(
+    rpc_addr: String,
+    connect_timeout: std::time::Duration,
+    request_timeout: std::time::Duration,
+) -> anyhow::Result<tonic::transport::Endpoint> {
+    Ok(tonic::transport::Endpoint::from_shared(rpc_addr)?
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout))
+}
+
 pub async fn get_rpc_client(
     args: &CommonArgs,
+) -> Option<FungiDaemonClient<tonic::transport::Channel>> {
+    get_rpc_client_with_timeout(args, DEFAULT_RPC_REQUEST_TIMEOUT).await
+}
+
+pub(super) async fn get_rpc_client_with_timeout(
+    args: &CommonArgs,
+    request_timeout: std::time::Duration,
 ) -> Option<FungiDaemonClient<tonic::transport::Channel>> {
     let fungi_config = match FungiConfig::try_read_from_dir(&args.fungi_dir()) {
         Ok(config) => config,
@@ -35,27 +57,32 @@ pub async fn get_rpc_client(
     };
 
     let connect_timeout = std::time::Duration::from_secs(3);
-    match tokio::time::timeout(connect_timeout, FungiDaemonClient::connect(rpc_addr)).await {
-        Ok(Ok(mut client)) => match client.config_file_path(Request::new(Empty {})).await {
-            Ok(resp) => {
-                let remote_config_path =
-                    std::path::PathBuf::from(resp.into_inner().config_file_path);
-                if config_paths_match(&remote_config_path, &expected_config_path) {
-                    Some(client)
-                } else {
-                    log::warn!(
-                        "Connected daemon config path mismatch: expected {}, got {}",
-                        expected_config_path.display(),
-                        remote_config_path.display()
-                    );
+    let endpoint = rpc_endpoint(rpc_addr, connect_timeout, request_timeout)
+        .unwrap_or_else(|error| fatal(format!("Invalid Fungi daemon endpoint: {error}")));
+    match tokio::time::timeout(connect_timeout, endpoint.connect()).await {
+        Ok(Ok(channel)) => {
+            let mut client = FungiDaemonClient::new(channel);
+            match client.config_file_path(Request::new(Empty {})).await {
+                Ok(resp) => {
+                    let remote_config_path =
+                        std::path::PathBuf::from(resp.into_inner().config_file_path);
+                    if config_paths_match(&remote_config_path, &expected_config_path) {
+                        Some(client)
+                    } else {
+                        log::warn!(
+                            "Connected daemon config path mismatch: expected {}, got {}",
+                            expected_config_path.display(),
+                            remote_config_path.display()
+                        );
+                        None
+                    }
+                }
+                Err(error) => {
+                    log::error!("Failed to query daemon config path: {}", error);
                     None
                 }
             }
-            Err(error) => {
-                log::error!("Failed to query daemon config path: {}", error);
-                None
-            }
-        },
+        }
         Ok(Err(e)) => {
             log::error!("Error connecting to daemon: {}", e);
             None
@@ -83,7 +110,70 @@ fn config_paths_match(left: &std::path::Path, right: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_paths_match, read_rpc_endpoint, rpc_address_from_endpoint};
+    use std::{convert::Infallible, future::Future, pin::Pin, time::Duration};
+
+    use fungi_daemon_grpc::fungi_daemon_grpc::fungi_daemon_client::FungiDaemonClient;
+    use tonic::{Request, body::Body, codegen::Service, server::NamedService};
+
+    use super::{config_paths_match, read_rpc_endpoint, rpc_address_from_endpoint, rpc_endpoint};
+
+    #[derive(Clone)]
+    struct HangingRpcService;
+
+    impl NamedService for HangingRpcService {
+        const NAME: &'static str = "fungi_daemon.FungiDaemon";
+    }
+
+    impl Service<tonic::codegen::http::Request<Body>> for HangingRpcService {
+        type Response = tonic::codegen::http::Response<Body>;
+        type Error = Infallible;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: tonic::codegen::http::Request<Body>) -> Self::Future {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_endpoint_times_out_a_stalled_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(HangingRpcService)
+                .serve_with_incoming(
+                    tonic::codegen::tokio_stream::wrappers::TcpListenerStream::new(listener),
+                ),
+        );
+
+        let channel = rpc_endpoint(
+            format!("http://{address}"),
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+        )
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+        let mut client = FungiDaemonClient::new(channel);
+        let started = tokio::time::Instant::now();
+        let error = client
+            .version(Request::new(fungi_daemon_grpc::fungi_daemon_grpc::Empty {}))
+            .await
+            .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.message().contains("Timeout expired"));
+        server.abort();
+    }
 
     #[test]
     fn config_path_match_accepts_relative_and_absolute_paths() {

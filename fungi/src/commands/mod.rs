@@ -4,10 +4,21 @@ pub mod fungi_init;
 pub mod fungi_migrate;
 pub mod fungi_relay;
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use fungi_config::{FungiDir, default_fungi_dir_name};
+
+pub const DEFAULT_PING_COUNT: u32 = 4;
+
+pub fn resolve_ping_count(count: Option<NonZeroU32>, watch: bool) -> u32 {
+    if watch {
+        0
+    } else {
+        count.map_or(DEFAULT_PING_COUNT, NonZeroU32::get)
+    }
+}
 
 /// A platform built for seamless multi-device integration
 #[derive(Parser)]
@@ -84,13 +95,19 @@ pub enum Commands {
     /// Connection observability and diagnostics
     #[command(subcommand, visible_alias = "conn")]
     Connection(fungi_control::ConnectionCommands),
-    /// Continuously ping all active connections to a device
+    /// Ping all active connections to a device
     Ping {
         /// Device name to ping
         peer: fungi_control::PeerInput,
         /// Ping interval in milliseconds
         #[arg(long, default_value_t = 2000)]
         interval_ms: u32,
+        /// Number of ping rounds to run (default: 4)
+        #[arg(long, conflicts_with = "watch")]
+        count: Option<NonZeroU32>,
+        /// Continue pinging until interrupted
+        #[arg(long, conflicts_with = "count", default_value_t = false)]
+        watch: bool,
         /// Show detailed output
         #[arg(short, long, default_value_t = false)]
         verbose: bool,

@@ -171,6 +171,9 @@ pub struct PingPeerRequest {
     pub peer_id: ::prost::alloc::string::String,
     #[prost(uint32, tag = "2")]
     pub interval_ms: u32,
+    /// Number of ping rounds to run. Zero keeps streaming until the client disconnects.
+    #[prost(uint32, tag = "3")]
+    pub count: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PingPeerEvent {
@@ -1144,7 +1147,7 @@ pub mod fungi_daemon_client {
                 .insert(GrpcMethod::new("fungi_daemon.FungiDaemon", "RemoveDevice"));
             self.inner.unary(req, path, codec).await
         }
-        /// Continuously pings all active connections to a peer and streams results.
+        /// Pings all active connections to a peer and streams each round's results.
         pub async fn ping_peer(
             &mut self,
             request: impl tonic::IntoRequest<super::PingPeerRequest>,
@@ -1819,7 +1822,7 @@ pub mod fungi_daemon_server {
                 Item = std::result::Result<super::PingPeerEvent, tonic::Status>,
             > + std::marker::Send
             + 'static;
-        /// Continuously pings all active connections to a peer and streams results.
+        /// Pings all active connections to a peer and streams each round's results.
         async fn ping_peer(
             &self,
             request: tonic::Request<super::PingPeerRequest>,
