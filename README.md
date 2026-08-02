@@ -80,6 +80,9 @@ Full documentation: [fungi.rs/docs](https://fungi.rs/docs/intro).
 | Android  | ✅ Ready       |
 | iOS      | 🚧 In progress |
 
+## AI assistance
+Since 2026, this project has primarily been developed with AI assistance, and its code is reviewed and tested by the maintainer.
+
 ## License
 
 Apache License 2.0
