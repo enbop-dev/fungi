@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::TcpListener as StdTcpListener,
-    time::Duration,
 };
 
 use anyhow::{Result, bail};
@@ -303,32 +302,28 @@ impl FungiDaemon {
             }
         }
 
-        for peer_id in peer_ids {
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                self.refresh_device_service_snapshot(peer_id),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    log::warn!(
-                        "Failed to refresh device service snapshot during startup restore for {}: {}",
-                        peer_id,
-                        error
-                    );
-                }
-                Err(_) => {
-                    log::warn!(
-                        "Timed out refreshing device service snapshot during startup restore for {}",
-                        peer_id
-                    );
-                }
+        for (peer_id, result) in self.refresh_device_service_snapshots(peer_ids).await {
+            if let Err(error) = result {
+                log::warn!(
+                    "Failed to refresh device service snapshot during startup restore for {}: {}",
+                    peer_id,
+                    error
+                );
             }
         }
 
-        self.restore_service_access_records_from_cached_snapshots(&records)
-            .await;
+        match self.local_preference_records().await {
+            Ok(current_records) => {
+                self.restore_service_access_records_from_cached_snapshots(&current_records)
+                    .await;
+            }
+            Err(error) => {
+                log::warn!(
+                    "Failed to reload local service access preferences after startup refresh: {}",
+                    error
+                );
+            }
+        }
     }
 
     async fn local_preference_records(&self) -> Result<Vec<LocalServicePreference>> {

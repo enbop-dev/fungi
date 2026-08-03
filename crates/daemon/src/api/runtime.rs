@@ -1,11 +1,13 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 use anyhow::{Context as _, Result};
 use fungi_config::runtime::Runtime as RuntimeConfig;
+use futures::{StreamExt, stream};
 use libp2p::PeerId;
 
 use crate::runtime::{
@@ -14,9 +16,10 @@ use crate::runtime::{
 };
 use crate::service_state::DesiredServiceState;
 use crate::{
-    FungiDaemon, LocalRuntimeStatus, ManifestResolutionPolicy, NodeCapabilities,
-    ResolvedServiceRecipe, ServiceControlResponse, ServiceRecipeDetail, ServiceRecipeRuntime,
-    ServiceRecipeSummary, build_local_node_capabilities, build_local_runtime_status,
+    DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY, DEVICE_SERVICE_REFRESH_TIMEOUT, FungiDaemon,
+    LocalRuntimeStatus, ManifestResolutionPolicy, NodeCapabilities, ResolvedServiceRecipe,
+    ServiceControlResponse, ServiceRecipeDetail, ServiceRecipeRuntime, ServiceRecipeSummary,
+    build_local_node_capabilities, build_local_runtime_status,
 };
 
 pub struct DeviceServiceSnapshotLookup {
@@ -39,6 +42,32 @@ impl DeviceServiceSnapshotSource {
             Self::Empty => "empty",
         }
     }
+}
+
+async fn refresh_device_service_snapshots_with<F, Fut>(
+    device_ids: impl IntoIterator<Item = PeerId>,
+    refresh: F,
+) -> Vec<(PeerId, Result<DeviceServiceSnapshot>)>
+where
+    F: Fn(PeerId) -> Fut,
+    Fut: Future<Output = Result<DeviceServiceSnapshot>>,
+{
+    let refresh = &refresh;
+    stream::iter(device_ids)
+        .map(|device_id| async move {
+            let result = tokio::time::timeout(DEVICE_SERVICE_REFRESH_TIMEOUT, refresh(device_id))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "timed out refreshing device service snapshot after {} seconds",
+                        DEVICE_SERVICE_REFRESH_TIMEOUT.as_secs()
+                    ))
+                });
+            (device_id, result)
+        })
+        .buffer_unordered(DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY)
+        .collect()
+        .await
 }
 
 impl FungiDaemon {
@@ -350,6 +379,16 @@ impl FungiDaemon {
         Ok(snapshot)
     }
 
+    pub async fn refresh_device_service_snapshots(
+        &self,
+        device_ids: impl IntoIterator<Item = PeerId>,
+    ) -> Vec<(PeerId, Result<DeviceServiceSnapshot>)> {
+        refresh_device_service_snapshots_with(device_ids, |device_id| {
+            self.refresh_device_service_snapshot(device_id)
+        })
+        .await
+    }
+
     pub fn save_device_service_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
         let snapshot_json = serde_json::to_string(snapshot)?;
         let fungi_dir = self.config_fungi_dir()?;
@@ -372,7 +411,11 @@ impl FungiDaemon {
         refresh: bool,
     ) -> Result<DeviceServiceSnapshotLookup> {
         if refresh {
-            match self.refresh_device_service_snapshot(device_id).await {
+            let mut results = self.refresh_device_service_snapshots([device_id]).await;
+            let (_, result) = results
+                .pop()
+                .expect("one device refresh should produce one result");
+            match result {
                 Ok(snapshot) => {
                     return Ok(DeviceServiceSnapshotLookup {
                         snapshot,
@@ -728,6 +771,8 @@ fn runtime_status_warning(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::test_support::TestDaemon;
     use crate::{
         DeviceServiceEndpoint, ServiceExposeUsage, ServiceExposeUsageKind, ServicePhase,
@@ -735,6 +780,50 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn batch_snapshot_refresh_limits_concurrency() {
+        let in_flight = AtomicUsize::new(0);
+        let max_in_flight = AtomicUsize::new(0);
+        let in_flight = &in_flight;
+        let max_in_flight = &max_in_flight;
+        let peer_ids = (0..DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY + 1)
+            .map(|_| PeerId::random())
+            .collect::<Vec<_>>();
+
+        let results = refresh_device_service_snapshots_with(peer_ids, move |peer_id| async move {
+            let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            max_in_flight.fetch_max(current, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(DeviceServiceSnapshot {
+                peer_id: peer_id.to_string(),
+                services: Vec::new(),
+                updated_at: SystemTime::now(),
+            })
+        })
+        .await;
+
+        assert_eq!(results.len(), DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY + 1);
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batch_snapshot_refresh_applies_shared_timeout() {
+        let results = refresh_device_service_snapshots_with([PeerId::random()], |_| {
+            std::future::pending::<Result<DeviceServiceSnapshot>>()
+        })
+        .await;
+
+        let error = results.into_iter().next().unwrap().1.unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "after {} seconds",
+            DEVICE_SERVICE_REFRESH_TIMEOUT.as_secs()
+        )));
+    }
 
     #[test]
     fn merges_managed_status_with_published_connectable_endpoint() {

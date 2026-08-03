@@ -5,10 +5,10 @@ use std::process::Command;
 use clap::{Args, Subcommand};
 use fungi_config::{FungiDir, devices::LOCAL_DEVICE_NAME, paths::FungiPaths};
 use fungi_daemon::{
-    DEFAULT_REMOTE_SERVICE_LOG_TAIL, DeviceService, DeviceServiceSnapshot,
-    MAX_REMOTE_SERVICE_LOG_TAIL, RuntimeKind, ServiceAccess, ServiceExposeUsageKind,
-    ServiceInstance, ServicePhase, ServicePortProtocol, ServiceStatus, parse_service_manifest_yaml,
-    service_manifest_with_instance_name,
+    DEFAULT_REMOTE_SERVICE_LOG_TAIL, DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY, DeviceService,
+    DeviceServiceSnapshot, MAX_REMOTE_SERVICE_LOG_TAIL, RuntimeKind, ServiceAccess,
+    ServiceExposeUsageKind, ServiceInstance, ServicePhase, ServicePortProtocol, ServiceStatus,
+    parse_service_manifest_yaml, service_manifest_with_instance_name,
 };
 use fungi_daemon_grpc::{
     Request,
@@ -22,6 +22,7 @@ use fungi_daemon_grpc::{
         ServiceNameRequest,
     },
 };
+use futures::{StreamExt, stream};
 use serde::Serialize;
 
 use crate::commands::CommonArgs;
@@ -1325,24 +1326,24 @@ async fn print_service_overview(client: &mut RpcClient, verbose: bool, refresh: 
     );
 
     let devices = list_saved_devices(client).await;
-    if refresh {
-        for device in devices {
-            let saved_accesses = list_accesses(client, &device.peer_id).await;
-            let snapshot = fetch_device_service_snapshot(client, &device.peer_id, true).await;
-            add_remote_service_overview_rows(
-                &mut rows,
-                &device,
-                &saved_accesses,
-                snapshot,
-                verbose,
-            );
-        }
-    } else {
-        for device in devices {
-            let accesses = list_accesses(client, &device.peer_id).await;
-            let snapshot = fetch_device_service_snapshot(client, &device.peer_id, false).await;
-            add_remote_service_overview_rows(&mut rows, &device, &accesses, snapshot, verbose);
-        }
+    let remote_devices = stream::iter(devices)
+        .map(|device| {
+            let mut access_client = client.clone();
+            let mut snapshot_client = client.clone();
+            async move {
+                let (saved_accesses, snapshot) = tokio::join!(
+                    list_accesses(&mut access_client, &device.peer_id),
+                    fetch_device_service_snapshot(&mut snapshot_client, &device.peer_id, refresh,),
+                );
+                (device, saved_accesses, snapshot)
+            }
+        })
+        .buffer_unordered(DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    for (device, saved_accesses, snapshot) in remote_devices {
+        add_remote_service_overview_rows(&mut rows, &device, &saved_accesses, snapshot, verbose);
     }
 
     rows.sort_by(|left, right| left.reference.cmp(&right.reference));

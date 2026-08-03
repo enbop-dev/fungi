@@ -39,6 +39,9 @@ pub use service_control::{
     ServiceControlError, ServiceControlRequest, ServiceControlResponse, ServiceControlServiceRef,
 };
 
+pub const DEVICE_SERVICE_REFRESH_MAX_CONCURRENCY: usize = 16;
+pub const DEVICE_SERVICE_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[derive(Debug, Clone, Default, Parser)]
 pub struct DaemonArgs {
     #[clap(
