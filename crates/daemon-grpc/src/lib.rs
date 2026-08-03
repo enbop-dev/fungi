@@ -153,7 +153,7 @@ impl PingPeerError {
 }
 
 pub async fn start_grpc_server(
-    daemon: fungi_daemon::FungiDaemon,
+    daemon: Arc<fungi_daemon::FungiDaemon>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
     tonic::transport::Server::builder()
@@ -172,10 +172,8 @@ pub struct FungiDaemonRpcImpl {
 }
 
 impl FungiDaemonRpcImpl {
-    pub fn new(inner: fungi_daemon::FungiDaemon) -> Self {
-        Self {
-            inner: Arc::new(inner),
-        }
+    pub fn new(inner: Arc<fungi_daemon::FungiDaemon>) -> Self {
+        Self { inner }
     }
 }
 

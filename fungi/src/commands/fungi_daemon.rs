@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use fungi_config::FungiDir;
 use fungi_daemon::FungiDaemon;
 use fungi_daemon_grpc::start_grpc_server;
+use std::sync::Arc;
 
 use super::fungi_relay::RelayArgs;
 
@@ -49,7 +50,7 @@ pub async fn run(common: CommonArgs, args: fungi_daemon::DaemonArgs) -> Result<(
     log::info!("Starting Fungi daemon...");
 
     let daemon = match FungiDaemon::start(fungi_dir.clone(), args.clone()).await {
-        Ok(daemon) => daemon,
+        Ok(daemon) => Arc::new(daemon),
         Err(error) => {
             print_startup_error("Failed to start Fungi daemon", &error);
             return Err(error);
@@ -79,7 +80,15 @@ pub async fn run(common: CommonArgs, args: fungi_daemon::DaemonArgs) -> Result<(
     let _published_endpoint =
         fungi_config::PublishedDaemonEndpoint::publish(&fungi_dir, rpc_socket_addr)?;
     log::info!("Daemon RPC endpoint: http://{rpc_socket_addr}");
-    let server_fut = start_grpc_server(daemon, rpc_listener);
+    let server_fut = start_grpc_server(daemon.clone(), rpc_listener);
+    let service_access_restore_task = tokio::spawn({
+        let daemon = daemon.clone();
+        async move {
+            log::info!("Restoring saved service access in the background...");
+            daemon.restore_saved_service_access_from_snapshots().await;
+            log::info!("Finished restoring saved service access");
+        }
+    });
 
     let stdin_monitor = if args.exit_on_stdin_close {
         Some(tokio::spawn(stdin_monitor()))
@@ -87,16 +96,23 @@ pub async fn run(common: CommonArgs, args: fungi_daemon::DaemonArgs) -> Result<(
         None
     };
 
-    tokio::select! {
+    let run_result = tokio::select! {
         signal = termination_signal() => {
-            let signal = signal.context("Failed to wait for daemon termination signal")?;
-            log::info!("Received {signal}, shutting down Fungi daemon...");
+            match signal {
+                Ok(signal) => {
+                    log::info!("Received {signal}, shutting down Fungi daemon...");
+                    Ok(())
+                }
+                Err(error) => Err(error).context("Failed to wait for daemon termination signal"),
+            }
         },
         res = server_fut => {
             if let Err(error) = res {
                 print_grpc_startup_error(&rpc_listen_address, &error);
                 log::error!("Error occurred while serving: {}", error);
-                return Err(error);
+                Err(error)
+            } else {
+                Ok(())
             }
         },
         _ = async {
@@ -107,10 +123,12 @@ pub async fn run(common: CommonArgs, args: fungi_daemon::DaemonArgs) -> Result<(
             }
         } => {
             log::info!("Shutting down Fungi daemon...");
+            Ok(())
         },
-    }
+    };
 
-    Ok(())
+    service_access_restore_task.abort();
+    run_result
 }
 
 async fn bind_rpc_listener(listen_address: &str) -> Result<tokio::net::TcpListener> {
