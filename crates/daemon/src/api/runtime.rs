@@ -667,7 +667,8 @@ impl FungiDaemon {
             .unwrap_or_default()
             .to_string();
         if !service_key.is_empty() {
-            self.detach_service_access_by_match(peer_id, &service_key)
+            self.detach_service_access(peer_id, service_key.clone())
+                .await
                 .with_context(|| {
                     format!(
                         "remote service stopped, but failed to disconnect local access listeners for {service_key}"

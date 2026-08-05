@@ -1283,6 +1283,7 @@ impl FungiDaemon for FungiDaemonRpcImpl {
 
         self.inner
             .detach_service_access(peer_id, req.service_name)
+            .await
             .map_err(|e| Status::internal(format!("Failed to detach service access: {e}")))?;
 
         Ok(Response::new(Empty {}))

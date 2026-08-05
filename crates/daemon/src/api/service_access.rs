@@ -91,6 +91,16 @@ impl FungiDaemon {
     ) -> Result<()> {
         let local_preferences_lock = self.local_preferences_lock();
         let _local_preferences_guard = local_preferences_lock.lock().await;
+        if self
+            .service_access_is_detached(&candidate.remote_peer_id, &candidate.remote_service_name)
+        {
+            log::debug!(
+                "Skipping detached service access restore for {}@{}",
+                candidate.remote_service_name,
+                candidate.remote_peer_id
+            );
+            return Ok(());
+        }
         let local_preferences = self.local_preferences()?;
         let Some(current_record) = local_preferences
             .find_record(
@@ -292,6 +302,7 @@ impl FungiDaemon {
         }
 
         enabled_endpoints.sort_by(|left, right| left.name.cmp(&right.name));
+        self.clear_service_access_detached(&peer_id_string, &service.name);
         Ok(ServiceAccess {
             peer_id: peer_id_string,
             service_name: service.name,
@@ -433,8 +444,12 @@ impl FungiDaemon {
         }
     }
 
-    pub fn detach_service_access(&self, peer_id: PeerId, service_name: String) -> Result<()> {
-        self.detach_service_access_by_match(peer_id, &service_name)
+    pub async fn detach_service_access(&self, peer_id: PeerId, service_name: String) -> Result<()> {
+        let local_preferences_lock = self.local_preferences_lock();
+        let _local_preferences_guard = local_preferences_lock.lock().await;
+        self.detach_service_access_by_match_internal(peer_id, &service_name)?;
+        self.mark_service_access_detached(&peer_id.to_string(), &service_name);
+        Ok(())
     }
 
     pub async fn restore_saved_service_access(
@@ -465,7 +480,11 @@ impl FungiDaemon {
         Ok(())
     }
 
-    pub fn detach_service_access_by_match(&self, peer_id: PeerId, matcher: &str) -> Result<()> {
+    fn detach_service_access_by_match_internal(
+        &self,
+        peer_id: PeerId,
+        matcher: &str,
+    ) -> Result<()> {
         let peer_id_string = peer_id.to_string();
         let rules_to_remove = self
             .get_service_access_forwarding_rules()
@@ -488,10 +507,11 @@ impl FungiDaemon {
         let local_preferences_lock = self.local_preferences_lock();
         let _local_preferences_guard = local_preferences_lock.lock().await;
 
-        self.detach_service_access_by_match(peer_id, &service_name)?;
+        self.detach_service_access_by_match_internal(peer_id, &service_name)?;
         let peer_id_string = peer_id.to_string();
         self.local_preferences()?
             .remove_service_records(&peer_id_string, &service_name)?;
+        self.clear_service_access_detached(&peer_id_string, &service_name);
         Ok(())
     }
 
@@ -513,6 +533,7 @@ impl FungiDaemon {
 
         self.local_preferences()?
             .remove_device_records(&peer_id_string)?;
+        self.clear_device_service_access_detached(&peer_id_string);
         Ok(())
     }
 
@@ -778,6 +799,65 @@ mod tests {
             .map(|(_, rule)| rule.local_port)
             .collect::<Vec<_>>();
         assert_eq!(active_ports, vec![second_local_port]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_restore_preserves_explicit_detach_until_reattach() -> Result<()> {
+        let service_name = "detached-restore";
+        let local_port = free_tcp_port()?;
+        let (client, server) =
+            setup_access_test_pair(service_name, vec![("main", free_tcp_port()?)]).await?;
+        let peer_id = server.peer_id();
+
+        client
+            .daemon()
+            .attach_service_access(
+                peer_id,
+                service_name.to_string(),
+                Some("main".to_string()),
+                Some(local_port),
+            )
+            .await?;
+        let stale_records = client.daemon().local_preference_records().await?;
+
+        client
+            .daemon()
+            .detach_service_access(peer_id, service_name.to_string())
+            .await?;
+        client
+            .daemon()
+            .restore_service_access_records_from_cached_snapshots(&stale_records)
+            .await;
+
+        assert!(
+            client
+                .daemon()
+                .get_service_access_forwarding_rules()
+                .is_empty()
+        );
+        assert_eq!(
+            client
+                .daemon()
+                .list_service_accesses(Some(peer_id))
+                .await?
+                .len(),
+            1
+        );
+
+        client
+            .daemon()
+            .attach_service_access(
+                peer_id,
+                service_name.to_string(),
+                Some("main".to_string()),
+                None,
+            )
+            .await?;
+        assert_eq!(
+            client.daemon().get_service_access_forwarding_rules().len(),
+            1
+        );
         Ok(())
     }
 

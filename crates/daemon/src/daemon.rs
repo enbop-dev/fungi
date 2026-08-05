@@ -45,6 +45,7 @@ pub struct FungiDaemon {
     trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
     direct_address_cache: Arc<Mutex<DirectAddressCache>>,
     local_preferences_lock: Arc<AsyncMutex<()>>,
+    detached_service_accesses: Mutex<BTreeSet<(String, String)>>,
     args: DaemonArgs,
 
     swarm_control: SwarmControl,
@@ -74,6 +75,30 @@ impl FungiDaemon {
 
     pub(crate) fn local_preferences_lock(&self) -> Arc<AsyncMutex<()>> {
         self.local_preferences_lock.clone()
+    }
+
+    pub(crate) fn service_access_is_detached(&self, peer_id: &str, service_name: &str) -> bool {
+        self.detached_service_accesses
+            .lock()
+            .contains(&(peer_id.to_string(), service_name.to_string()))
+    }
+
+    pub(crate) fn mark_service_access_detached(&self, peer_id: &str, service_name: &str) {
+        self.detached_service_accesses
+            .lock()
+            .insert((peer_id.to_string(), service_name.to_string()));
+    }
+
+    pub(crate) fn clear_service_access_detached(&self, peer_id: &str, service_name: &str) {
+        self.detached_service_accesses
+            .lock()
+            .remove(&(peer_id.to_string(), service_name.to_string()));
+    }
+
+    pub(crate) fn clear_device_service_access_detached(&self, peer_id: &str) {
+        self.detached_service_accesses
+            .lock()
+            .retain(|(detached_peer_id, _)| detached_peer_id != peer_id);
     }
 
     pub fn swarm_control(&self) -> &SwarmControl {
@@ -240,6 +265,7 @@ impl FungiDaemon {
             trusted_devices_config,
             direct_address_cache,
             local_preferences_lock,
+            detached_service_accesses: Mutex::new(BTreeSet::new()),
             args,
             swarm_control,
             mdns_control,
