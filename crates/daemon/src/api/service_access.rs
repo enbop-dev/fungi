@@ -84,6 +84,35 @@ impl FungiDaemon {
         }
     }
 
+    async fn restore_current_service_access_forwarding_record(
+        &self,
+        candidate: &LocalServicePreference,
+        endpoint: &DeviceServiceEndpoint,
+    ) -> Result<()> {
+        let local_preferences_lock = self.local_preferences_lock();
+        let _local_preferences_guard = local_preferences_lock.lock().await;
+        let local_preferences = self.local_preferences()?;
+        let Some(current_record) = local_preferences
+            .find_record(
+                &candidate.remote_peer_id,
+                &candidate.remote_service_name,
+                &candidate.remote_service_port_name,
+            )
+            .cloned()
+        else {
+            log::debug!(
+                "Skipping stale service access restore for {}@{} entry {}",
+                candidate.remote_service_name,
+                candidate.remote_peer_id,
+                candidate.remote_service_port_name
+            );
+            return Ok(());
+        };
+
+        self.restore_service_access_forwarding_record(&current_record, endpoint)
+            .await
+    }
+
     async fn restore_service_access_forwarding_rule(&self, rule: ForwardingRule) {
         if let Err(error) = self.add_service_access_forwarding_rule_internal(rule).await {
             log::warn!(
@@ -388,7 +417,7 @@ impl FungiDaemon {
             };
 
             if let Err(error) = self
-                .restore_service_access_forwarding_record(record, endpoint)
+                .restore_current_service_access_forwarding_record(record, endpoint)
                 .await
             {
                 log::warn!(
@@ -658,6 +687,97 @@ mod tests {
             .filter(|access| access.service_name == service_name)
             .count();
         assert!(saved_count <= 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_restore_does_not_recreate_forgotten_listener() -> Result<()> {
+        let service_name = "forgotten-restore";
+        let (client, server) =
+            setup_access_test_pair(service_name, vec![("main", free_tcp_port()?)]).await?;
+        let peer_id = server.peer_id();
+
+        client
+            .daemon()
+            .attach_service_access(
+                peer_id,
+                service_name.to_string(),
+                Some("main".to_string()),
+                None,
+            )
+            .await?;
+        let stale_records = client.daemon().local_preference_records().await?;
+
+        client
+            .daemon()
+            .forget_service_access(peer_id, service_name.to_string())
+            .await?;
+        client
+            .daemon()
+            .restore_service_access_records_from_cached_snapshots(&stale_records)
+            .await;
+
+        assert!(
+            client
+                .daemon()
+                .get_service_access_forwarding_rules()
+                .is_empty()
+        );
+        assert!(
+            client
+                .daemon()
+                .list_service_accesses(Some(peer_id))
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_restore_preserves_reattached_listener() -> Result<()> {
+        let service_name = "reattached-restore";
+        let first_local_port = free_tcp_port()?;
+        let mut second_local_port = free_tcp_port()?;
+        while second_local_port == first_local_port {
+            second_local_port = free_tcp_port()?;
+        }
+        let (client, server) =
+            setup_access_test_pair(service_name, vec![("main", free_tcp_port()?)]).await?;
+        let peer_id = server.peer_id();
+
+        client
+            .daemon()
+            .attach_service_access(
+                peer_id,
+                service_name.to_string(),
+                Some("main".to_string()),
+                Some(first_local_port),
+            )
+            .await?;
+        let stale_records = client.daemon().local_preference_records().await?;
+
+        client
+            .daemon()
+            .attach_service_access(
+                peer_id,
+                service_name.to_string(),
+                Some("main".to_string()),
+                Some(second_local_port),
+            )
+            .await?;
+        client
+            .daemon()
+            .restore_service_access_records_from_cached_snapshots(&stale_records)
+            .await;
+
+        let active_ports = client
+            .daemon()
+            .get_service_access_forwarding_rules()
+            .into_iter()
+            .filter(|(_, rule)| rule.remote_service_name.as_deref() == Some(service_name))
+            .map(|(_, rule)| rule.local_port)
+            .collect::<Vec<_>>();
+        assert_eq!(active_ports, vec![second_local_port]);
         Ok(())
     }
 
