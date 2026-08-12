@@ -1,16 +1,18 @@
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use fungi_config::runtime::Runtime as RuntimeConfig;
 use libp2p::PeerId;
 
 use crate::runtime::{
     DeviceService, DeviceServiceSnapshot, RuntimeKind, ServiceInstance, ServiceLogs,
-    ServiceLogsOptions, ServiceManifest, service_expose_endpoint_bindings,
+    ServiceLogsOptions, ServiceManifest,
+};
+use crate::service_endpoints::{
+    sync_service_endpoint_listeners_by_name, sync_service_endpoint_listeners_for_manifest,
 };
 use crate::service_state::DesiredServiceState;
 use crate::{
@@ -67,9 +69,13 @@ impl FungiDaemon {
         name: &str,
         enabled: bool,
     ) -> Result<()> {
-        let manifest = self.runtime_control().get_service_manifest(name);
-        self.sync_service_endpoint_listeners_for_manifest(manifest.as_ref(), enabled)
-            .await
+        sync_service_endpoint_listeners_by_name(
+            self.runtime_control(),
+            self.tcp_tunneling_control(),
+            name,
+            enabled,
+        )
+        .await
     }
 
     async fn sync_service_endpoint_listeners_for_manifest(
@@ -77,39 +83,12 @@ impl FungiDaemon {
         manifest: Option<&ServiceManifest>,
         enabled: bool,
     ) -> Result<()> {
-        let Some(manifest) = manifest else {
-            return Ok(());
-        };
-
-        let endpoints = service_expose_endpoint_bindings(manifest);
-        let listening_rules = self.get_service_endpoint_listening_rules();
-
-        for endpoint in endpoints {
-            let existing_rule_id = listening_rules
-                .iter()
-                .find(|(_, rule)| {
-                    rule.port == endpoint.host_port
-                        && rule.protocol.as_deref() == Some(endpoint.protocol.as_str())
-                })
-                .map(|(rule_id, _)| rule_id.clone());
-
-            if enabled {
-                if existing_rule_id.is_none() {
-                    self.tcp_tunneling_control()
-                        .add_listening_rule(fungi_config::tcp_tunneling::ListeningRule {
-                            host: "127.0.0.1".to_string(),
-                            port: endpoint.host_port,
-                            protocol: Some(endpoint.protocol),
-                        })
-                        .await?;
-                }
-            } else if let Some(rule_id) = existing_rule_id {
-                self.tcp_tunneling_control()
-                    .remove_listening_rule(&rule_id)?;
-            }
-        }
-
-        Ok(())
+        sync_service_endpoint_listeners_for_manifest(
+            self.tcp_tunneling_control(),
+            manifest,
+            enabled,
+        )
+        .await
     }
 
     pub fn supports_runtime(&self, runtime: RuntimeKind) -> bool {
@@ -184,8 +163,11 @@ impl FungiDaemon {
     }
 
     pub async fn start_service_by_name(&self, name: String) -> Result<()> {
-        self.runtime_control().start_by_name(&name).await?;
-        self.sync_service_endpoint_listeners_by_name(&name, true)
+        self.devices()
+            .local()
+            .services()
+            .service(name)
+            .start()
             .await
     }
 
@@ -196,9 +178,7 @@ impl FungiDaemon {
     }
 
     pub async fn stop_service_by_name(&self, name: String) -> Result<()> {
-        self.runtime_control().stop_by_name(&name).await?;
-        self.sync_service_endpoint_listeners_by_name(&name, false)
-            .await
+        self.devices().local().services().service(name).stop().await
     }
 
     pub async fn remove_service(&self, runtime: RuntimeKind, name: String) -> Result<()> {
@@ -209,9 +189,11 @@ impl FungiDaemon {
     }
 
     pub async fn remove_service_by_name(&self, name: String) -> Result<()> {
-        let manifest = self.runtime_control().get_service_manifest(&name);
-        self.runtime_control().remove_by_name(&name).await?;
-        self.sync_service_endpoint_listeners_for_manifest(manifest.as_ref(), false)
+        self.devices()
+            .local()
+            .services()
+            .service(name)
+            .remove()
             .await
     }
 
@@ -253,15 +235,11 @@ impl FungiDaemon {
     }
 
     pub async fn list_exposed_services(&self) -> Result<Vec<DeviceService>> {
-        self.runtime_control()
-            .list_published_device_services()
-            .await
+        self.devices().local().services().published().await
     }
 
     pub async fn list_peer_services(&self, peer_id: PeerId) -> Result<Vec<DeviceService>> {
-        self.service_discovery_control()
-            .list_peer_services(peer_id)
-            .await
+        self.devices().peer(peer_id).services().published().await
     }
 
     pub async fn list_service_recipes(&self, refresh: bool) -> Result<Vec<ServiceRecipeSummary>> {
@@ -303,67 +281,22 @@ impl FungiDaemon {
         &self,
         device_id: PeerId,
     ) -> Result<Option<DeviceServiceSnapshot>> {
-        let fungi_dir = self.config_fungi_dir()?;
-        let cache =
-            fungi_config::service_cache::DeviceServiceSnapshotCache::apply_from_dir(&fungi_dir)?;
-        let Some(snapshot_json) = cache.get_device_snapshot_json(&device_id.to_string())? else {
-            return Ok(None);
-        };
-        serde_json::from_str(&snapshot_json)
-            .map(Some)
-            .map_err(|error| {
-                anyhow::anyhow!("failed to decode cached device service snapshot: {}", error)
-            })
+        self.devices().peer(device_id).services().snapshot()
     }
 
     pub async fn refresh_device_service_snapshot(
         &self,
         device_id: PeerId,
     ) -> Result<DeviceServiceSnapshot> {
-        let managed_response = self
-            .service_control_protocol_control()
-            .list_peer_services(device_id)
-            .await;
-        let published = self.list_peer_services(device_id).await;
-
-        let managed_response = managed_response.with_context(|| {
-            format!("failed to refresh managed services for device {device_id}")
-        })?;
-        let published = published.with_context(|| {
-            format!("failed to refresh published services for device {device_id}")
-        })?;
-
-        let managed = managed_response
-            .services_json
-            .as_deref()
-            .map(serde_json::from_str::<Vec<ServiceInstance>>)
-            .transpose()
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to decode managed services from device {device_id}: {error}"
-                )
-            })?
-            .unwrap_or_default();
-
-        let snapshot = merge_device_service_snapshot(device_id, managed, published);
-        self.save_device_service_snapshot(&snapshot)?;
-        Ok(snapshot)
+        self.devices().peer(device_id).services().refresh().await
     }
 
     pub fn save_device_service_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
-        let snapshot_json = serde_json::to_string(snapshot)?;
-        let fungi_dir = self.config_fungi_dir()?;
-        let cache =
-            fungi_config::service_cache::DeviceServiceSnapshotCache::apply_from_dir(&fungi_dir)?;
-        cache.set_device_snapshot_json(snapshot.peer_id.clone(), snapshot_json)?;
-        Ok(())
+        self.devices().save_snapshot(snapshot)
     }
 
     pub fn remove_device_service_snapshot(&self, device_id: PeerId) -> Result<bool> {
-        let fungi_dir = self.config_fungi_dir()?;
-        let cache =
-            fungi_config::service_cache::DeviceServiceSnapshotCache::apply_from_dir(&fungi_dir)?;
-        cache.remove_device_snapshot(&device_id.to_string())
+        self.devices().peer(device_id).services().remove_snapshot()
     }
 
     pub async fn get_device_service_snapshot(
@@ -420,40 +353,21 @@ impl FungiDaemon {
         }
     }
 
-    async fn refresh_or_keep_device_service_snapshot(&self, device_id: PeerId) {
-        if let Err(refresh_error) = self.refresh_device_service_snapshot(device_id).await {
-            log::warn!(
-                "Failed to refresh device service snapshot for device {device_id} after remote mutation: {refresh_error}"
-            );
-        }
-    }
-
-    fn remove_cached_device_service(&self, device_id: PeerId, name: &str) -> Result<bool> {
-        let Some(mut snapshot) = self.load_device_service_snapshot(device_id)? else {
-            return Ok(false);
-        };
-        let before = snapshot.services.len();
-        snapshot.services.retain(|service| service.name != name);
-        if snapshot.services.len() == before {
-            return Ok(false);
-        }
-
-        self.save_device_service_snapshot(&snapshot)?;
-        Ok(true)
-    }
-
     pub async fn forget_device_service(
         &self,
         device_id: PeerId,
         name: &str,
     ) -> Result<ServiceControlResponse> {
-        if !self.remove_cached_device_service(device_id, name)? {
+        if !self
+            .devices()
+            .peer(device_id)
+            .services()
+            .service(name)
+            .forget_cached_observation()
+            .await?
+        {
             anyhow::bail!("cached service not found for device: {name}");
         }
-
-        self.forget_service_access(device_id, name.to_string())
-            .await
-            .with_context(|| format!("failed to forget local access records for service {name}"))?;
         Ok(ServiceControlResponse::success_forgotten_locally(
             None,
             name.to_string(),
@@ -544,12 +458,16 @@ impl FungiDaemon {
         peer_id: PeerId,
         manifest_yaml: String,
     ) -> Result<ServiceControlResponse> {
-        let response = self
-            .service_control_protocol_control()
-            .pull_peer_service(peer_id, manifest_yaml)
+        let service = self
+            .devices()
+            .peer(peer_id)
+            .services()
+            .apply_manifest_yaml(manifest_yaml, None)
             .await?;
-        self.refresh_or_keep_device_service_snapshot(peer_id).await;
-        Ok(response)
+        Ok(ServiceControlResponse::success(
+            None,
+            service.name().to_string(),
+        ))
     }
 
     pub async fn remote_start_service(
@@ -557,25 +475,12 @@ impl FungiDaemon {
         peer_id: PeerId,
         name: String,
     ) -> Result<ServiceControlResponse> {
-        let response = self
-            .service_control_protocol_control()
-            .start_peer_service(peer_id, name.clone())
-            .await?;
-        let service_key = response
-            .service
-            .as_ref()
-            .map(|service| service.name.as_str())
-            .unwrap_or(name.as_str())
-            .to_string();
-        self.refresh_or_keep_device_service_snapshot(peer_id).await;
-        self.restore_saved_service_access(peer_id, service_key.clone())
-            .await
-            .with_context(|| {
-                format!(
-                    "remote service started, but failed to restore saved local access listeners for {service_key}"
-                )
-            })?;
-        Ok(response)
+        let service = self.devices().peer(peer_id).services().service(name);
+        service.start().await?;
+        Ok(ServiceControlResponse::success(
+            None,
+            service.name().to_string(),
+        ))
     }
 
     pub async fn remote_list_services(&self, peer_id: PeerId) -> Result<ServiceControlResponse> {
@@ -592,20 +497,12 @@ impl FungiDaemon {
         name: String,
         tail: Option<usize>,
     ) -> Result<ServiceLogs> {
-        let tail = tail
-            .unwrap_or(crate::DEFAULT_REMOTE_SERVICE_LOG_TAIL)
-            .clamp(1, crate::MAX_REMOTE_SERVICE_LOG_TAIL);
-        let response = self
-            .service_control_protocol_control()
-            .get_peer_service_logs(peer_id, name, tail)
-            .await?;
-        let text = response
-            .logs_text
-            .ok_or_else(|| anyhow::anyhow!("remote service log response did not include logs"))?;
-        Ok(ServiceLogs {
-            raw: Vec::new(),
-            text,
-        })
+        self.devices()
+            .peer(peer_id)
+            .services()
+            .service(name)
+            .logs(tail)
+            .await
     }
 
     pub async fn remote_stop_service(
@@ -613,26 +510,12 @@ impl FungiDaemon {
         peer_id: PeerId,
         name: String,
     ) -> Result<ServiceControlResponse> {
-        let response = self
-            .service_control_protocol_control()
-            .stop_peer_service(peer_id, name)
-            .await?;
-        let service_key = response
-            .service
-            .as_ref()
-            .map(|service| service.name.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if !service_key.is_empty() {
-            self.detach_service_access_by_match(peer_id, &service_key)
-                .with_context(|| {
-                    format!(
-                        "remote service stopped, but failed to disconnect local access listeners for {service_key}"
-                    )
-                })?;
-        }
-        self.refresh_or_keep_device_service_snapshot(peer_id).await;
-        Ok(response)
+        let service = self.devices().peer(peer_id).services().service(name);
+        service.stop().await?;
+        Ok(ServiceControlResponse::success(
+            None,
+            service.name().to_string(),
+        ))
     }
 
     pub async fn remote_remove_service(
@@ -640,65 +523,12 @@ impl FungiDaemon {
         peer_id: PeerId,
         name: String,
     ) -> Result<ServiceControlResponse> {
-        let response = self
-            .service_control_protocol_control()
-            .remove_peer_service(peer_id, name.clone())
-            .await?;
-        let service_key = response
-            .service
-            .as_ref()
-            .map(|service| service.name.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if !service_key.is_empty() {
-            self.forget_service_access(peer_id, service_key.clone())
-                .await
-                .with_context(|| {
-                    format!(
-                        "remote service removed, but failed to forget local access records for {service_key}"
-                    )
-                })?;
-        }
-        self.refresh_or_keep_device_service_snapshot(peer_id).await;
-        Ok(response)
-    }
-}
-
-fn merge_device_service_snapshot(
-    device_id: PeerId,
-    managed: Vec<ServiceInstance>,
-    published: Vec<DeviceService>,
-) -> DeviceServiceSnapshot {
-    let mut services_by_name = BTreeMap::<String, DeviceService>::new();
-
-    for service in managed {
-        services_by_name.insert(service.name.clone(), device_service_from_instance(service));
-    }
-
-    for service in published {
-        services_by_name
-            .entry(service.name.clone())
-            .and_modify(|existing| {
-                existing.metadata = service.metadata.clone();
-                existing.endpoints = service.endpoints.clone();
-            })
-            .or_insert(service);
-    }
-
-    DeviceServiceSnapshot {
-        peer_id: device_id.to_string(),
-        services: services_by_name.into_values().collect(),
-        updated_at: SystemTime::now(),
-    }
-}
-
-fn device_service_from_instance(instance: ServiceInstance) -> DeviceService {
-    DeviceService {
-        name: instance.name,
-        runtime: instance.runtime,
-        metadata: Default::default(),
-        endpoints: Vec::new(),
-        status: instance.status,
+        let service = self.devices().peer(peer_id).services().service(name);
+        service.remove().await?;
+        Ok(ServiceControlResponse::success(
+            None,
+            service.name().to_string(),
+        ))
     }
 }
 
@@ -728,6 +558,9 @@ fn runtime_status_warning(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::devices::merge_device_service_snapshot;
     use crate::test_support::TestDaemon;
     use crate::{
         DeviceServiceEndpoint, ServiceExposeUsage, ServiceExposeUsageKind, ServicePhase,

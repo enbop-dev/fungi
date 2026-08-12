@@ -15,7 +15,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::controls::TcpTunnelingControl;
 use crate::{
     ManifestResolutionPolicy, RuntimeControl, ServiceControlRequest, ServiceControlResponse,
-    ServiceManifest, service_expose_endpoint_bindings, service_state::DesiredServiceState,
+    ServiceManifest,
+    service_endpoints::{
+        sync_service_endpoint_listeners_by_name, sync_service_endpoint_listeners_for_manifest,
+    },
+    service_state::DesiredServiceState,
 };
 
 const MAX_CONTROL_FRAME_LEN: usize = 2 * 1024 * 1024;
@@ -350,9 +354,13 @@ impl ServiceControlProtocolControl {
         name: &str,
         enabled: bool,
     ) -> Result<()> {
-        let manifest = self.runtime_control.get_service_manifest(name);
-        self.sync_service_endpoint_listeners_for_manifest(manifest.as_ref(), enabled)
-            .await
+        sync_service_endpoint_listeners_by_name(
+            &self.runtime_control,
+            &self.tcp_tunneling_control,
+            name,
+            enabled,
+        )
+        .await
     }
 
     async fn sync_service_endpoint_listeners_for_manifest(
@@ -360,38 +368,8 @@ impl ServiceControlProtocolControl {
         manifest: Option<&ServiceManifest>,
         enabled: bool,
     ) -> Result<()> {
-        let Some(manifest) = manifest else {
-            return Ok(());
-        };
-
-        let endpoints = service_expose_endpoint_bindings(manifest);
-        let listening_rules = self.tcp_tunneling_control.get_listening_rules();
-
-        for endpoint in endpoints {
-            let existing_rule_id = listening_rules
-                .iter()
-                .find(|(_, rule)| {
-                    rule.port == endpoint.host_port
-                        && rule.protocol.as_deref() == Some(endpoint.protocol.as_str())
-                })
-                .map(|(rule_id, _)| rule_id.clone());
-
-            if enabled {
-                if existing_rule_id.is_none() {
-                    self.tcp_tunneling_control
-                        .add_listening_rule(fungi_config::tcp_tunneling::ListeningRule {
-                            host: "127.0.0.1".to_string(),
-                            port: endpoint.host_port,
-                            protocol: Some(endpoint.protocol),
-                        })
-                        .await?;
-                }
-            } else if let Some(rule_id) = existing_rule_id {
-                self.tcp_tunneling_control.remove_listening_rule(&rule_id)?;
-            }
-        }
-
-        Ok(())
+        sync_service_endpoint_listeners_for_manifest(&self.tcp_tunneling_control, manifest, enabled)
+            .await
     }
 }
 

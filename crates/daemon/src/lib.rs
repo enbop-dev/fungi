@@ -1,11 +1,14 @@
 mod api;
 mod controls;
 mod daemon;
+mod devices;
 mod http_client;
 mod node_capabilities;
 mod recipes;
 pub mod runtime;
+mod service_access_manager;
 mod service_control;
+mod service_endpoints;
 mod service_state;
 
 /// Utilities for spawning ephemeral [`FungiDaemon`] instances in tests.
@@ -18,6 +21,7 @@ pub use api::{ServiceAccess, ServiceAccessEndpoint};
 use clap::Parser;
 pub use controls::{DEFAULT_REMOTE_SERVICE_LOG_TAIL, MAX_REMOTE_SERVICE_LOG_TAIL};
 pub use daemon::FungiDaemon;
+pub use devices::{DeviceHandle, DeviceKind, DeviceServices, Devices, ServiceHandle};
 pub use node_capabilities::{
     LocalRuntimeAvailability, LocalRuntimeStatus, NodeCapabilities, NodeRuntimeCapabilities,
     build_local_node_capabilities, build_local_runtime_status,

@@ -1,7 +1,5 @@
 use anyhow::Result;
 use fungi_config::devices::DeviceInfo;
-use fungi_swarm::PeerAddressSource;
-use libp2p::Multiaddr;
 use libp2p::PeerId;
 
 use crate::FungiDaemon;
@@ -18,40 +16,22 @@ impl FungiDaemon {
     }
 
     pub fn devices_get_all(&self) -> Vec<DeviceInfo> {
-        self.devices().lock().get_all_devices().clone()
+        self.devices().saved_device_infos()
     }
 
     pub fn devices_add_or_update(&self, device_info: DeviceInfo) -> Result<()> {
-        let current_devices_config = self.devices().lock().clone();
-        let updated_devices_config =
-            current_devices_config.add_or_update_device(device_info.clone())?;
-        *self.devices().lock() = updated_devices_config;
-        self.hydrate_device_info(&device_info);
-        Ok(())
+        self.devices().add_or_update(device_info)
     }
 
     pub fn devices_get_peer(&self, peer_id: PeerId) -> Option<DeviceInfo> {
-        self.devices().lock().get_device_info(&peer_id).cloned()
+        self.devices().get(peer_id).and_then(|device| device.info())
     }
 
     pub async fn devices_remove(&self, peer_id: PeerId) -> Result<()> {
-        let current_devices_config = self.devices().lock().clone();
-        let updated_devices_config = current_devices_config.remove_device(&peer_id)?;
-        *self.devices().lock() = updated_devices_config;
-
+        self.devices().remove(peer_id).await?;
+        // Preserve the current CLI behavior while authorization remains a separate daemon-level
+        // domain. `Devices::remove` itself intentionally does not imply this policy decision.
         self.untrust_device(peer_id)?;
-        self.remove_device_local_service_state(peer_id).await?;
-        Ok(())
-    }
-
-    async fn remove_device_local_service_state(&self, peer_id: PeerId) -> Result<()> {
-        self.forget_device_service_accesses(peer_id).await?;
-
-        let fungi_dir = self.config_fungi_dir()?;
-        let snapshots =
-            fungi_config::service_cache::DeviceServiceSnapshotCache::apply_from_dir(&fungi_dir)?;
-        let peer_id = peer_id.to_string();
-        let _ = snapshots.remove_device_snapshot(&peer_id)?;
         Ok(())
     }
 
@@ -60,7 +40,7 @@ impl FungiDaemon {
             .swarm_control()
             .state()
             .get_incoming_allowed_peers_list();
-        let devices_config_guard = self.devices();
+        let devices_config_guard = self.devices_config();
         let devices_config = devices_config_guard.lock();
 
         trusted_device_ids
@@ -72,27 +52,5 @@ impl FungiDaemon {
                 },
             )
             .collect()
-    }
-
-    fn hydrate_device_info(&self, device_info: &DeviceInfo) {
-        for address in &device_info.multiaddrs {
-            match address.parse::<Multiaddr>() {
-                Ok(multiaddr) => {
-                    self.swarm_control().state().record_peer_address(
-                        device_info.peer_id,
-                        multiaddr,
-                        PeerAddressSource::DeviceConfig,
-                    );
-                }
-                Err(error) => {
-                    log::debug!(
-                        "Ignoring invalid device multiaddr for peer {}: {} ({})",
-                        device_info.peer_id,
-                        address,
-                        error
-                    );
-                }
-            }
-        }
     }
 }

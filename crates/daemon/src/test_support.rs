@@ -159,7 +159,7 @@ impl TestDaemonBuilder {
             DaemonArgs::default(),
             cfg,
             keypair,
-            DevicesConfig::default(),
+            DevicesConfig::apply_from_dir(dir.path())?,
             trusted_devices,
             DirectAddressCache::apply_from_dir(dir.path())?,
         )
