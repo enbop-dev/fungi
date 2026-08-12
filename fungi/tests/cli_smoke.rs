@@ -6,7 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fungi_config::FungiConfig;
+use fungi_config::{
+    FungiConfig,
+    devices::{DeviceInfo, DevicesConfig},
+    local_preferences::{LocalPortSource, LocalPreferenceCache, LocalServicePreference},
+};
 use tempfile::TempDir;
 
 struct DaemonChild {
@@ -77,6 +81,57 @@ fn daemon_publishes_dynamic_endpoint_and_enforces_one_instance_per_fungi_dir() {
     let recovered_endpoint = fungi_config::read_daemon_endpoint(home.path()).unwrap();
     assert!(recovered_endpoint.starts_with("http://127.0.0.1:"));
     recovered.stop_gracefully();
+}
+
+#[test]
+fn daemon_publishes_endpoint_before_saved_service_access_refresh_finishes() {
+    let home = TempDir::new().unwrap();
+    let swarm = reserve_port();
+    init_fungi_dir(home.path(), 0, swarm);
+
+    let blackhole = TcpListener::bind("127.0.0.1:0").unwrap();
+    let blackhole_port = blackhole.local_addr().unwrap().port();
+    thread::spawn(move || {
+        if let Ok((_stream, _)) = blackhole.accept() {
+            thread::sleep(Duration::from_secs(20));
+        }
+    });
+
+    let peer_id = libp2p::PeerId::random();
+    let mut device = DeviceInfo::new_unknown(peer_id);
+    device.name = Some("slow-device".to_string());
+    device.multiaddrs = vec![format!("/ip4/127.0.0.1/tcp/{blackhole_port}/p2p/{peer_id}")];
+    DevicesConfig::apply_from_dir(home.path())
+        .unwrap()
+        .add_or_update_device(device)
+        .unwrap();
+    LocalPreferenceCache::apply_from_dir(home.path())
+        .unwrap()
+        .upsert_record(LocalServicePreference {
+            remote_peer_id: peer_id.to_string(),
+            remote_service_name: "slow-service".to_string(),
+            remote_service_port_name: "main".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            local_port: reserve_port(),
+            local_port_source: LocalPortSource::Auto,
+        })
+        .unwrap();
+
+    let daemon = start_daemon(home.path());
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(3);
+    while !fungi_config::daemon_endpoint_path(home.path()).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "daemon endpoint publication waited for background service access refresh"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let output = run_cli(home.path(), ["info", "version"]);
+    assert!(!output.stdout.trim().is_empty());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    daemon.stop_gracefully();
 }
 
 #[test]
