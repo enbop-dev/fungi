@@ -14,6 +14,7 @@ mod service_control;
 mod service_endpoints;
 mod service_state;
 mod services;
+mod settings;
 
 /// Utilities for spawning ephemeral [`FungiDaemon`] instances in tests.
 ///
@@ -50,6 +51,7 @@ pub use service_control::{
     ServiceControlError, ServiceControlRequest, ServiceControlResponse, ServiceControlServiceRef,
 };
 pub use services::{DeviceServices, ServiceHandle, ServiceKey, Services};
+pub use settings::Settings;
 
 #[derive(Debug, Clone, Default, Parser)]
 pub struct DaemonArgs {

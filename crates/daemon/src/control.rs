@@ -7,15 +7,15 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
-    Connectivity, InboundAccessPolicy,
+    Connectivity, InboundAccessPolicy, Settings,
     controls::{
-        DockerControl, NodeCapabilitiesControl, ServiceControlProtocolControl,
-        ServiceDiscoveryControl, TcpTunnelingControl, mdns::MdnsControl,
+        NodeCapabilitiesControl, ServiceControlProtocolControl, ServiceDiscoveryControl,
+        TcpTunnelingControl, mdns::MdnsControl,
     },
-    devices::Devices,
+    devices::{DeviceHandle, Devices},
     runtime::RuntimeControl,
     service_access_manager::{ServiceAccessManager, restore_saved_service_accesses},
-    services::Services,
+    services::{ServiceHandle, ServiceKey, Services},
 };
 
 /// Cloneable entry point for all daemon application APIs.
@@ -25,51 +25,62 @@ use crate::{
 /// their corresponding domain handles as the refactor progresses.
 #[derive(Clone)]
 pub struct FungiControl {
-    config: Arc<Mutex<FungiConfig>>,
+    settings: Settings,
     devices: Devices,
     services: Services,
     service_access: ServiceAccessManager,
     inbound_access: InboundAccessPolicy,
     connectivity: Connectivity,
-    docker_control: Option<DockerControl>,
-    node_capabilities_control: NodeCapabilitiesControl,
 }
 
 pub(crate) struct FungiControlInit {
-    pub config: Arc<Mutex<FungiConfig>>,
+    pub settings: Settings,
     pub devices: Devices,
     pub services: Services,
     pub service_access: ServiceAccessManager,
     pub inbound_access: InboundAccessPolicy,
     pub connectivity: Connectivity,
-    pub docker_control: Option<DockerControl>,
-    pub node_capabilities_control: NodeCapabilitiesControl,
 }
 
 impl FungiControl {
     pub(crate) fn new(init: FungiControlInit) -> Self {
         Self {
-            config: init.config,
+            settings: init.settings,
             devices: init.devices,
             services: init.services,
             service_access: init.service_access,
             inbound_access: init.inbound_access,
             connectivity: init.connectivity,
-            docker_control: init.docker_control,
-            node_capabilities_control: init.node_capabilities_control,
         }
     }
 
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Compatibility handle for callers that still need to inspect the complete config.
     pub fn config(&self) -> Arc<Mutex<FungiConfig>> {
-        self.config.clone()
+        self.settings.config_handle()
     }
 
     pub fn devices(&self) -> &Devices {
         &self.devices
     }
 
+    pub fn device(&self, device_id: libp2p::PeerId) -> Result<DeviceHandle> {
+        self.devices
+            .get(device_id)
+            .ok_or_else(|| anyhow::anyhow!("device is not managed: {device_id}"))
+    }
+
     pub fn services(&self) -> &Services {
         &self.services
+    }
+
+    pub fn service(&self, key: ServiceKey) -> ServiceHandle {
+        self.services
+            .for_device(key.device_id)
+            .service(key.service_name)
     }
 
     pub fn connectivity(&self) -> &Connectivity {
@@ -92,10 +103,6 @@ impl FungiControl {
         self.connectivity.swarm_control()
     }
 
-    pub fn docker_control(&self) -> Option<&DockerControl> {
-        self.docker_control.as_ref()
-    }
-
     pub fn tcp_tunneling_control(&self) -> &TcpTunnelingControl {
         self.services.tcp_tunneling()
     }
@@ -112,8 +119,9 @@ impl FungiControl {
         self.services.service_discovery()
     }
 
+    /// Low-level compatibility accessor used by protocol integration tests.
     pub fn node_capabilities_control(&self) -> &NodeCapabilitiesControl {
-        &self.node_capabilities_control
+        self.devices.node_capabilities()
     }
 
     pub fn service_control_protocol_control(&self) -> &ServiceControlProtocolControl {
@@ -138,11 +146,6 @@ impl FungiControl {
     }
 
     pub fn config_fungi_dir(&self) -> Result<PathBuf> {
-        self.config
-            .lock()
-            .config_file_path()
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| anyhow::anyhow!("config file has no parent directory"))
+        self.settings.fungi_dir()
     }
 }

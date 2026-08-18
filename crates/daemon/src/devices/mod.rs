@@ -5,13 +5,14 @@ use fungi_config::devices::{DeviceInfo, DevicesConfig};
 use libp2p::PeerId;
 use parking_lot::Mutex;
 
-use crate::{Connectivity, DeviceServices, Services};
+use crate::{Connectivity, DeviceServices, Services, controls::NodeCapabilitiesControl};
 
 struct DevicesInner {
     local_device: DeviceInfo,
     config: Arc<Mutex<DevicesConfig>>,
     connectivity: Connectivity,
     services: Services,
+    node_capabilities: NodeCapabilitiesControl,
 }
 
 pub(crate) struct DevicesInit {
@@ -19,6 +20,7 @@ pub(crate) struct DevicesInit {
     pub config: DevicesConfig,
     pub connectivity: Connectivity,
     pub services: Services,
+    pub node_capabilities: NodeCapabilitiesControl,
 }
 
 /// Directory and shared capabilities for devices actively managed by this daemon.
@@ -38,6 +40,7 @@ impl Devices {
                 config: Arc::new(Mutex::new(init.config)),
                 connectivity: init.connectivity,
                 services: init.services,
+                node_capabilities: init.node_capabilities,
             }),
         }
     }
@@ -120,6 +123,10 @@ impl Devices {
 
     pub(crate) fn config(&self) -> Arc<Mutex<DevicesConfig>> {
         self.inner.config.clone()
+    }
+
+    pub(crate) fn node_capabilities(&self) -> &NodeCapabilitiesControl {
+        &self.inner.node_capabilities
     }
 
     fn record_addresses(&self, device_info: &DeviceInfo) {

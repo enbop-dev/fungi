@@ -7,13 +7,16 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use fungi_config::runtime::Runtime as RuntimeConfig;
 use fungi_config::service_cache::DeviceServiceSnapshotCache;
 use libp2p::PeerId;
 
 use crate::{
     DeviceService, DeviceServiceSnapshot, ManifestResolutionPolicy, ServiceInstance, ServiceLogs,
     ServiceLogsOptions,
-    controls::{ServiceControlProtocolControl, ServiceDiscoveryControl, TcpTunnelingControl},
+    controls::{
+        DockerControl, ServiceControlProtocolControl, ServiceDiscoveryControl, TcpTunnelingControl,
+    },
     runtime::RuntimeControl,
     service_endpoints::{
         sync_service_endpoint_listeners_by_name, sync_service_endpoint_listeners_for_manifest,
@@ -25,6 +28,7 @@ const REMOTE_SERVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct LocalServiceBackend {
     runtime: RuntimeControl,
+    docker: Option<DockerControl>,
     tcp_tunneling: TcpTunnelingControl,
 }
 
@@ -44,6 +48,7 @@ pub(crate) struct ServicesInit {
     pub local_device_id: PeerId,
     pub fungi_dir: PathBuf,
     pub runtime: RuntimeControl,
+    pub docker: Option<DockerControl>,
     pub service_discovery: ServiceDiscoveryControl,
     pub service_control: ServiceControlProtocolControl,
     pub tcp_tunneling: TcpTunnelingControl,
@@ -63,6 +68,7 @@ impl Services {
                 fungi_dir: init.fungi_dir,
                 local: LocalServiceBackend {
                     runtime: init.runtime,
+                    docker: init.docker,
                     tcp_tunneling: init.tcp_tunneling,
                 },
                 remote: RemoteServiceBackend {
@@ -82,6 +88,17 @@ impl Services {
 
     pub(crate) fn runtime(&self) -> &RuntimeControl {
         &self.inner.local.runtime
+    }
+
+    pub(crate) fn apply_runtime_config(&self, config: &RuntimeConfig) -> Result<()> {
+        if let Some(docker) = &self.inner.local.docker {
+            docker.update_runtime_config(config)?;
+        }
+        self.inner
+            .local
+            .runtime
+            .update_allowed_host_paths(config.allowed_host_paths.clone());
+        Ok(())
     }
 
     pub(crate) fn service_discovery(&self) -> &ServiceDiscoveryControl {
@@ -120,6 +137,15 @@ impl Services {
 pub struct ServiceKey {
     pub device_id: PeerId,
     pub service_name: String,
+}
+
+impl ServiceKey {
+    pub fn new(device_id: PeerId, service_name: impl Into<String>) -> Self {
+        Self {
+            device_id,
+            service_name: service_name.into(),
+        }
+    }
 }
 
 /// Collection and observation boundary for one device's services.
@@ -238,10 +264,7 @@ impl DeviceServices {
 
     pub fn service(&self, name: impl Into<String>) -> ServiceHandle {
         ServiceHandle {
-            key: ServiceKey {
-                device_id: self.device_id,
-                service_name: name.into(),
-            },
+            key: ServiceKey::new(self.device_id, name),
             services: self.services.clone(),
         }
     }

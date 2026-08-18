@@ -45,22 +45,20 @@ impl DeviceServiceSnapshotSource {
 
 impl FungiControl {
     pub fn docker_enabled(&self) -> bool {
-        self.config().lock().runtime.docker_enabled()
+        self.settings().runtime().docker_enabled()
     }
 
     pub fn get_runtime_config(&self) -> RuntimeConfig {
-        self.config().lock().get_runtime_config()
+        self.settings().runtime()
     }
 
     pub fn add_runtime_allowed_host_path(&self, path: PathBuf) -> Result<()> {
-        let current_config = self.config().lock().clone();
-        let updated_config = current_config.add_runtime_allowed_host_path(path)?;
+        let updated_config = self.settings().add_runtime_allowed_host_path(path)?;
         self.apply_runtime_config_update(updated_config)
     }
 
     pub fn remove_runtime_allowed_host_path(&self, path: &Path) -> Result<()> {
-        let current_config = self.config().lock().clone();
-        let updated_config = current_config.remove_runtime_allowed_host_path(path)?;
+        let updated_config = self.settings().remove_runtime_allowed_host_path(path)?;
         self.apply_runtime_config_update(updated_config)
     }
 
@@ -96,12 +94,9 @@ impl FungiControl {
     }
 
     fn fungi_home_dir(&self) -> PathBuf {
-        self.config()
-            .lock()
-            .config_file_path()
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .to_path_buf()
+        self.settings()
+            .fungi_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
     }
 
     fn manifest_resolution_policy(&self) -> ManifestResolutionPolicy {
@@ -109,13 +104,8 @@ impl FungiControl {
     }
 
     fn apply_runtime_config_update(&self, updated_config: fungi_config::FungiConfig) -> Result<()> {
-        if let Some(docker_control) = self.docker_control() {
-            docker_control.update_runtime_config(&updated_config.runtime)?;
-        }
-        self.runtime_control()
-            .update_allowed_host_paths(updated_config.runtime.allowed_host_paths.clone());
-        *self.config().lock() = updated_config;
-        Ok(())
+        self.services()
+            .apply_runtime_config(&updated_config.runtime)
     }
 
     pub async fn pull_service(&self, manifest: ServiceManifest) -> Result<ServiceInstance> {
@@ -356,17 +346,18 @@ impl FungiControl {
     }
 
     pub fn local_node_capabilities(&self) -> NodeCapabilities {
-        let config = self.config().lock().clone();
+        let config = self.settings().snapshot();
         build_local_node_capabilities(&config, self.runtime_control())
     }
 
     pub fn local_runtime_status(&self) -> LocalRuntimeStatus {
-        let config = self.config().lock().clone();
+        let config = self.settings().snapshot();
         build_local_runtime_status(&config, self.runtime_control())
     }
 
     pub async fn get_peer_capability_summary(&self, peer_id: PeerId) -> Result<NodeCapabilities> {
-        self.node_capabilities_control()
+        self.devices()
+            .node_capabilities()
             .discover_peer_capabilities(peer_id)
             .await
     }

@@ -3,12 +3,11 @@ use std::{
     env,
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
-    sync::Arc,
     time::Duration,
 };
 
 use crate::{
-    Connectivity, DaemonArgs, InboundAccessPolicy,
+    Connectivity, DaemonArgs, InboundAccessPolicy, Settings,
     control::{FungiControl, FungiControlInit},
     controls::{
         DockerControl, NodeCapabilitiesControl, ServiceControlProtocolControl,
@@ -26,7 +25,6 @@ use fungi_config::{
 use fungi_swarm::{FungiSwarm, PeerAddressSource, State, TSwarm};
 use fungi_util::keypair::get_keypair_from_dir;
 use libp2p::{Multiaddr, identity::Keypair, multiaddr::Protocol};
-use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
@@ -132,7 +130,7 @@ impl FungiDaemon {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let docker_control = DockerControl::from_config(&config.runtime, &fungi_home)?;
-        let shared_config = Arc::new(Mutex::new(config.clone()));
+        let settings = Settings::new(config.clone());
         let runtime_root = config
             .config_file_path()
             .parent()
@@ -154,7 +152,7 @@ impl FungiDaemon {
         service_discovery_control.start()?;
         let node_capabilities_control = NodeCapabilitiesControl::new(
             swarm_control.clone(),
-            shared_config.clone(),
+            settings.config_handle(),
             runtime_control.clone(),
         );
         node_capabilities_control.start()?;
@@ -175,6 +173,7 @@ impl FungiDaemon {
             local_device_id: device_info.peer_id,
             fungi_dir: fungi_home,
             runtime: runtime_control,
+            docker: docker_control,
             service_discovery: service_discovery_control,
             service_control: service_control_protocol_control,
             tcp_tunneling: tcp_tunneling_control,
@@ -184,18 +183,17 @@ impl FungiDaemon {
             config: devices_config,
             connectivity: connectivity.clone(),
             services: services.clone(),
+            node_capabilities: node_capabilities_control,
         });
 
         let direct_address_cache_sync_task = connectivity.spawn_direct_address_cache_sync();
         let control = FungiControl::new(FungiControlInit {
-            config: shared_config,
+            settings,
             devices,
             services,
             service_access: service_access_manager,
             inbound_access,
             connectivity,
-            docker_control,
-            node_capabilities_control,
         });
 
         restore_service_endpoint_listeners(&control).await?;

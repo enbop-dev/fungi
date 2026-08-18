@@ -84,7 +84,7 @@ impl FungiControl {
     }
 
     pub fn host_name(&self) -> Option<String> {
-        self.config().lock().get_hostname()
+        self.settings().hostname()
     }
 
     #[cfg(target_os = "android")]
@@ -99,8 +99,7 @@ impl FungiControl {
     }
 
     pub fn config_file_path(&self) -> String {
-        self.config()
-            .lock()
+        self.settings()
             .config_file_path()
             .to_string_lossy()
             .to_string()
