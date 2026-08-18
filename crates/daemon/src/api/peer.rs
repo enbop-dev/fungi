@@ -24,6 +24,7 @@ impl FungiControl {
             };
 
         let active_streams_by_protocol = self
+            .connectivity()
             .swarm_control()
             .state()
             .connection_active_stream_protocol_counts(&conn.connection_id())
@@ -76,7 +77,8 @@ impl FungiControl {
     }
 
     fn is_configured_relay_peer(&self, peer_id: PeerId) -> bool {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_relay_endpoint_statuses()
             .into_iter()
@@ -95,7 +97,10 @@ impl FungiControl {
     }
 
     pub fn peer_id(&self) -> String {
-        self.swarm_control().local_peer_id().to_string()
+        self.connectivity()
+            .swarm_control()
+            .local_peer_id()
+            .to_string()
     }
 
     pub fn config_file_path(&self) -> String {
@@ -116,6 +121,7 @@ impl FungiControl {
 
     pub fn get_peer_connections(&self, peer_id: PeerId) -> Option<Vec<ConnectionRecord>> {
         let connections = self
+            .connectivity()
             .swarm_control()
             .state()
             .get_connections_by_peer_id(&peer_id);
@@ -127,7 +133,8 @@ impl FungiControl {
     }
 
     pub fn list_external_address_candidates(&self) -> Vec<ExternalAddressSnapshot> {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_external_address_candidates()
             .into_iter()
@@ -136,7 +143,8 @@ impl FungiControl {
     }
 
     pub fn list_relay_endpoint_statuses(&self) -> Vec<RelayEndpointStatusSnapshot> {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_relay_endpoint_statuses()
             .into_iter()
@@ -145,7 +153,8 @@ impl FungiControl {
     }
 
     pub fn list_peer_addresses(&self) -> Vec<PeerAddressSnapshot> {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_peer_addresses()
             .into_iter()
@@ -154,7 +163,7 @@ impl FungiControl {
     }
 
     pub fn list_connections(&self, peer_id: Option<PeerId>) -> Vec<ConnectionSnapshot> {
-        let state = self.swarm_control().state();
+        let state = self.connectivity().swarm_control().state();
 
         let mut snapshots = Vec::new();
         for pid in state.connected_peer_ids() {
@@ -181,6 +190,7 @@ impl FungiControl {
 
     pub fn list_active_streams(&self) -> Vec<ActiveStreamSnapshot> {
         let mut streams = self
+            .connectivity()
             .swarm_control()
             .state()
             .list_active_streams()
@@ -203,6 +213,7 @@ impl FungiControl {
         protocol: StreamProtocol,
     ) -> Vec<ActiveStreamSnapshot> {
         let mut streams = self
+            .connectivity()
             .swarm_control()
             .state()
             .active_streams_by_protocol(&protocol)

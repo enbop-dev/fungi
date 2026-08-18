@@ -33,7 +33,6 @@ use crate::{
     services::{Services, ServicesInit},
 };
 
-#[allow(dead_code)]
 pub struct FungiDaemon {
     control: FungiControl,
     swarm_task: JoinHandle<()>,
@@ -196,7 +195,7 @@ impl FungiDaemon {
             connectivity,
         });
 
-        restore_service_endpoint_listeners(&control).await?;
+        restore_local_service_endpoint_listeners(&control).await?;
 
         Ok(Self {
             control,
@@ -227,18 +226,19 @@ impl Drop for FungiDaemon {
     }
 }
 
-async fn restore_service_endpoint_listeners(control: &FungiControl) -> Result<()> {
-    let mut listening_rules = control.tcp_tunneling_control().get_listening_rules();
+/// Restores listeners for services running on this device. This path performs no remote refresh.
+async fn restore_local_service_endpoint_listeners(control: &FungiControl) -> Result<()> {
+    let mut listening_rules = control.services().tcp_tunneling().get_listening_rules();
     let mut restored_protocols = std::collections::BTreeSet::new();
 
-    for service in control.runtime_control().list_services().await? {
+    for service in control.services().runtime().list_services().await? {
         if !service.status.is_running() {
             continue;
         }
 
         for endpoint in service.exposed_endpoints {
             restore_service_endpoint_listener(
-                control.tcp_tunneling_control(),
+                control.services().tcp_tunneling(),
                 &mut listening_rules,
                 &mut restored_protocols,
                 endpoint.host_port,
@@ -249,12 +249,13 @@ async fn restore_service_endpoint_listeners(control: &FungiControl) -> Result<()
     }
 
     for manifest in control
-        .runtime_control()
+        .services()
+        .runtime()
         .desired_running_service_manifests()
     {
         for endpoint in crate::runtime::service_expose_endpoint_bindings(&manifest) {
             restore_service_endpoint_listener(
-                control.tcp_tunneling_control(),
+                control.services().tcp_tunneling(),
                 &mut listening_rules,
                 &mut restored_protocols,
                 endpoint.host_port,

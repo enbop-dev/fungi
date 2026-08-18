@@ -68,8 +68,8 @@ impl FungiControl {
         enabled: bool,
     ) -> Result<()> {
         sync_service_endpoint_listeners_by_name(
-            self.runtime_control(),
-            self.tcp_tunneling_control(),
+            self.services().runtime(),
+            self.services().tcp_tunneling(),
             name,
             enabled,
         )
@@ -82,7 +82,7 @@ impl FungiControl {
         enabled: bool,
     ) -> Result<()> {
         sync_service_endpoint_listeners_for_manifest(
-            self.tcp_tunneling_control(),
+            self.services().tcp_tunneling(),
             manifest,
             enabled,
         )
@@ -90,7 +90,7 @@ impl FungiControl {
     }
 
     pub fn supports_runtime(&self, runtime: RuntimeKind) -> bool {
-        self.runtime_control().supports(runtime)
+        self.services().runtime().supports(runtime)
     }
 
     fn fungi_home_dir(&self) -> PathBuf {
@@ -109,7 +109,7 @@ impl FungiControl {
     }
 
     pub async fn pull_service(&self, manifest: ServiceManifest) -> Result<ServiceInstance> {
-        let applied = self.runtime_control().apply(&manifest).await?;
+        let applied = self.services().runtime().apply(&manifest).await?;
         if applied.desired_state == DesiredServiceState::Running {
             self.sync_service_endpoint_listeners_for_manifest(
                 applied.previous_manifest.as_ref(),
@@ -131,7 +131,8 @@ impl FungiControl {
         let base_dir = manifest_base_dir.unwrap_or_else(|| fungi_home.clone());
         let policy = self.manifest_resolution_policy();
         let applied = self
-            .runtime_control()
+            .services()
+            .runtime()
             .apply_manifest_yaml(&manifest_yaml, &base_dir, &fungi_home, &policy)
             .await?;
         if applied.desired_state == DesiredServiceState::Running {
@@ -147,7 +148,7 @@ impl FungiControl {
     }
 
     pub async fn start_service(&self, runtime: RuntimeKind, name: String) -> Result<()> {
-        self.runtime_control().start(runtime, &name).await?;
+        self.services().runtime().start(runtime, &name).await?;
         self.sync_service_endpoint_listeners_by_name(&name, true)
             .await
     }
@@ -162,7 +163,7 @@ impl FungiControl {
     }
 
     pub async fn stop_service(&self, runtime: RuntimeKind, name: String) -> Result<()> {
-        self.runtime_control().stop(runtime, &name).await?;
+        self.services().runtime().stop(runtime, &name).await?;
         self.sync_service_endpoint_listeners_by_name(&name, false)
             .await
     }
@@ -172,8 +173,8 @@ impl FungiControl {
     }
 
     pub async fn remove_service(&self, runtime: RuntimeKind, name: String) -> Result<()> {
-        let manifest = self.runtime_control().get_service_manifest(&name);
-        self.runtime_control().remove(runtime, &name).await?;
+        let manifest = self.services().runtime().get_service_manifest(&name);
+        self.services().runtime().remove(runtime, &name).await?;
         self.sync_service_endpoint_listeners_for_manifest(manifest.as_ref(), false)
             .await
     }
@@ -192,11 +193,11 @@ impl FungiControl {
         runtime: RuntimeKind,
         name: String,
     ) -> Result<ServiceInstance> {
-        self.runtime_control().inspect(runtime, &name).await
+        self.services().runtime().inspect(runtime, &name).await
     }
 
     pub async fn inspect_service_by_name(&self, name: String) -> Result<ServiceInstance> {
-        self.runtime_control().inspect_by_name(&name).await
+        self.services().runtime().inspect_by_name(&name).await
     }
 
     pub async fn get_service_logs(
@@ -205,7 +206,8 @@ impl FungiControl {
         name: String,
         tail: Option<String>,
     ) -> Result<ServiceLogs> {
-        self.runtime_control()
+        self.services()
+            .runtime()
             .logs(runtime, &name, &ServiceLogsOptions { tail })
             .await
     }
@@ -215,13 +217,14 @@ impl FungiControl {
         name: String,
         tail: Option<String>,
     ) -> Result<ServiceLogs> {
-        self.runtime_control()
+        self.services()
+            .runtime()
             .logs_by_name(&name, &ServiceLogsOptions { tail })
             .await
     }
 
     pub async fn list_services(&self) -> Result<Vec<ServiceInstance>> {
-        self.runtime_control().list_services().await
+        self.services().runtime().list_services().await
     }
 
     pub async fn list_exposed_services(&self) -> Result<Vec<DeviceService>> {
@@ -347,12 +350,12 @@ impl FungiControl {
 
     pub fn local_node_capabilities(&self) -> NodeCapabilities {
         let config = self.settings().snapshot();
-        build_local_node_capabilities(&config, self.runtime_control())
+        build_local_node_capabilities(&config, self.services().runtime())
     }
 
     pub fn local_runtime_status(&self) -> LocalRuntimeStatus {
         let config = self.settings().snapshot();
-        build_local_runtime_status(&config, self.runtime_control())
+        build_local_runtime_status(&config, self.services().runtime())
     }
 
     pub async fn get_peer_capability_summary(&self, peer_id: PeerId) -> Result<NodeCapabilities> {

@@ -529,7 +529,7 @@ impl FungiDaemon for FungiDaemonRpcImpl {
             )))
             .await?;
 
-            match daemon.swarm_control().connect(peer_id).await {
+            match daemon.connectivity().swarm_control().connect(peer_id).await {
                 Ok(connections) if !connections.is_empty() => {
                     tx.send(Ok(ping_event(
                         &peer_id_str,
@@ -583,6 +583,7 @@ impl FungiDaemon for FungiDaemonRpcImpl {
                     let daemon = daemon.clone();
                     ping_set.spawn(async move {
                         let res = daemon
+                            .connectivity()
                             .swarm_control()
                             .ping_connection(connection_id, per_ping_timeout)
                             .await;

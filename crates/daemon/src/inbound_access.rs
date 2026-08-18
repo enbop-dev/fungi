@@ -63,10 +63,6 @@ impl InboundAccessPolicy {
         peers.sort();
         peers
     }
-
-    pub(crate) fn trusted_peers_config(&self) -> Arc<Mutex<TrustedDevicesConfig>> {
-        self.inner.trusted_peers.clone()
-    }
 }
 
 #[cfg(test)]
@@ -129,8 +125,7 @@ mod tests {
         second_task.join().unwrap();
 
         assert_eq!(policy.authorized_peers().len(), 2);
-        let trusted_peers = policy.trusted_peers_config();
-        assert_eq!(trusted_peers.lock().trusted_devices.len(), 2);
+        assert_eq!(policy.inner.trusted_peers.lock().trusted_devices.len(), 2);
     }
 
     #[test]

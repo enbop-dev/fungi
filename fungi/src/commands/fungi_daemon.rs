@@ -57,7 +57,7 @@ pub async fn run(common: CommonArgs, args: fungi_daemon::DaemonArgs) -> Result<(
     };
     let control = daemon.control();
 
-    let swarm_control = control.swarm_control().clone();
+    let swarm_control = control.connectivity().swarm_control().clone();
     log::info!("Local Peer ID: {}", swarm_control.local_peer_id());
 
     let network_info = swarm_control
@@ -66,7 +66,7 @@ pub async fn run(common: CommonArgs, args: fungi_daemon::DaemonArgs) -> Result<(
         .unwrap();
     log::info!("Network info: {network_info:?}");
 
-    let rpc_listen_address = control.config().lock().rpc.listen_address.clone();
+    let rpc_listen_address = control.settings().snapshot().rpc.listen_address;
     let rpc_listener = match bind_rpc_listener(&rpc_listen_address).await {
         Ok(listener) => listener,
         Err(error) => {

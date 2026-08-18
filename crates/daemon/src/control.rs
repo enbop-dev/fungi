@@ -1,19 +1,11 @@
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use anyhow::Result;
-use fungi_config::{FungiConfig, devices::DevicesConfig, trusted_devices::TrustedDevicesConfig};
-use fungi_swarm::SwarmControl;
-use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
     Connectivity, InboundAccessPolicy, Settings,
-    controls::{
-        NodeCapabilitiesControl, ServiceControlProtocolControl, ServiceDiscoveryControl,
-        TcpTunnelingControl, mdns::MdnsControl,
-    },
     devices::{DeviceHandle, Devices},
-    runtime::RuntimeControl,
     service_accesses::{ServiceAccesses, restore_saved_service_accesses},
     services::{ServiceHandle, ServiceKey, Services},
 };
@@ -57,11 +49,6 @@ impl FungiControl {
         &self.settings
     }
 
-    /// Compatibility handle for callers that still need to inspect the complete config.
-    pub fn config(&self) -> Arc<Mutex<FungiConfig>> {
-        self.settings.config_handle()
-    }
-
     pub fn devices(&self) -> &Devices {
         &self.devices
     }
@@ -90,45 +77,8 @@ impl FungiControl {
         &self.inbound_access
     }
 
-    pub fn devices_config(&self) -> Arc<Mutex<DevicesConfig>> {
-        self.devices.config()
-    }
-
-    pub fn trusted_devices(&self) -> Arc<Mutex<TrustedDevicesConfig>> {
-        self.inbound_access.trusted_peers_config()
-    }
-
-    pub fn swarm_control(&self) -> &SwarmControl {
-        self.connectivity.swarm_control()
-    }
-
-    pub fn tcp_tunneling_control(&self) -> &TcpTunnelingControl {
-        self.services.tcp_tunneling()
-    }
-
     pub fn service_access(&self) -> &ServiceAccesses {
         &self.service_access
-    }
-
-    pub fn runtime_control(&self) -> &RuntimeControl {
-        self.services.runtime()
-    }
-
-    pub fn service_discovery_control(&self) -> &ServiceDiscoveryControl {
-        self.services.service_discovery()
-    }
-
-    /// Low-level compatibility accessor used by protocol integration tests.
-    pub fn node_capabilities_control(&self) -> &NodeCapabilitiesControl {
-        self.devices.node_capabilities()
-    }
-
-    pub fn service_control_protocol_control(&self) -> &ServiceControlProtocolControl {
-        self.services.service_control()
-    }
-
-    pub fn mdns_control(&self) -> &MdnsControl {
-        self.connectivity.mdns_control()
     }
 
     /// Starts the one-shot restoration of saved remote service accesses.

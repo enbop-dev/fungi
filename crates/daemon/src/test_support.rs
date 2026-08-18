@@ -207,7 +207,11 @@ impl TestDaemon {
 
     /// The [`PeerId`] of this daemon.
     pub fn peer_id(&self) -> PeerId {
-        self.inner.control_ref().swarm_control().local_peer_id()
+        self.inner
+            .control_ref()
+            .connectivity()
+            .swarm_control()
+            .local_peer_id()
     }
 
     /// A `Multiaddr` that can be dialled by another daemon on the same host.
@@ -236,7 +240,7 @@ impl TestDaemon {
 
     /// Borrow the underlying [`fungi_swarm::SwarmControl`].
     pub fn swarm_control(&self) -> &fungi_swarm::SwarmControl {
-        self.inner.control_ref().swarm_control()
+        self.inner.control_ref().connectivity().swarm_control()
     }
 
     // ── Connection helpers ────────────────────────────────────────────────
@@ -371,11 +375,10 @@ mod tests {
         assert_ne!(client.peer_id(), server.peer_id());
 
         // Server's trusted devices should include the client.
-        let trusted_devices = server.daemon().trusted_devices();
-        let client_in_list = trusted_devices
-            .lock()
-            .trusted_devices
-            .contains(&client.peer_id());
+        let client_in_list = server
+            .daemon()
+            .inbound_access()
+            .is_authorized(client.peer_id());
         assert!(client_in_list, "server should trust client device");
     }
 
@@ -389,7 +392,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(d.daemon().config().lock().network.relay_enabled);
+        assert!(d.daemon().settings().snapshot().network.relay_enabled);
     }
 
     #[tokio::test]
@@ -404,8 +407,7 @@ mod tests {
             .await
             .unwrap();
 
-        let config_handle = d.daemon().config();
-        let config = config_handle.lock();
+        let config = d.daemon().settings().snapshot();
         assert!(config.network.relay_enabled);
         assert!(!config.network.use_community_relays);
         assert_eq!(config.network.custom_relay_addresses, vec![relay_addr]);
@@ -433,10 +435,8 @@ mod tests {
         assert!(
             !victim
                 .daemon()
-                .trusted_devices()
-                .lock()
-                .trusted_devices
-                .contains(&attacker_peer_id),
+                .inbound_access()
+                .is_authorized(attacker_peer_id),
             "victim must not trust attacker device"
         );
 

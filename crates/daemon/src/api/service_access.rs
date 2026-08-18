@@ -17,7 +17,7 @@ impl FungiControl {
     pub fn get_service_endpoint_listening_rules(
         &self,
     ) -> Vec<(String, fungi_config::tcp_tunneling::ListeningRule)> {
-        self.tcp_tunneling_control().get_listening_rules()
+        self.services().tcp_tunneling().get_listening_rules()
     }
 
     pub async fn attach_service_access(

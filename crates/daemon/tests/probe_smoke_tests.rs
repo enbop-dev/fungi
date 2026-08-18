@@ -63,6 +63,7 @@ async fn active_probe_ping_returns_rtt_and_updates_connection_state() -> Result<
 
     let rtt = client
         .daemon()
+        .connectivity()
         .swarm_control()
         .ping_connection(connection_id, Duration::from_secs(2))
         .await?;
@@ -159,6 +160,7 @@ async fn active_probe_ping_can_use_inbound_connection_id() -> Result<()> {
 
     let rtt = client
         .daemon()
+        .connectivity()
         .swarm_control()
         .ping_connection(connection_id, Duration::from_secs(2))
         .await?;

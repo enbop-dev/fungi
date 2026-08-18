@@ -121,11 +121,8 @@ impl Devices {
         Ok(())
     }
 
-    pub(crate) fn config(&self) -> Arc<Mutex<DevicesConfig>> {
-        self.inner.config.clone()
-    }
-
-    pub(crate) fn node_capabilities(&self) -> &NodeCapabilitiesControl {
+    /// Low-level protocol handle for focused integration tests.
+    pub fn node_capabilities(&self) -> &NodeCapabilitiesControl {
         &self.inner.node_capabilities
     }
 

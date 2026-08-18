@@ -7,6 +7,7 @@ use crate::FungiControl;
 impl FungiControl {
     pub async fn mdns_get_local_devices(&self) -> Result<Vec<DeviceInfo>> {
         let local_devices = self
+            .connectivity()
             .mdns_control()
             .get_all_devices()
             .values()
@@ -38,17 +39,15 @@ impl FungiControl {
 
     pub fn list_trusted_devices(&self) -> Vec<DeviceInfo> {
         let trusted_device_ids = self.inbound_access().authorized_peers();
-        let devices_config_guard = self.devices_config();
-        let devices_config = devices_config_guard.lock();
 
         trusted_device_ids
             .into_iter()
-            .map(
-                |peer_id| match devices_config.get_device_info(&peer_id).cloned() {
-                    Some(device_info) => device_info,
-                    None => DeviceInfo::new_unknown(peer_id),
-                },
-            )
+            .map(|peer_id| {
+                self.devices()
+                    .get(peer_id)
+                    .and_then(|device| device.info())
+                    .unwrap_or_else(|| DeviceInfo::new_unknown(peer_id))
+            })
             .collect()
     }
 }

@@ -73,7 +73,8 @@ async fn untrusted_device_cannot_use_service_control_over_existing_inbound_conne
 
     let result = attacker
         .daemon()
-        .service_control_protocol_control()
+        .services()
+        .service_control()
         .list_peer_services(victim.peer_id())
         .await;
 
@@ -92,7 +93,8 @@ async fn untrusted_device_cannot_use_node_capabilities_over_existing_inbound_con
 
     let result = attacker
         .daemon()
-        .node_capabilities_control()
+        .devices()
+        .node_capabilities()
         .discover_peer_capabilities(victim.peer_id())
         .await;
 

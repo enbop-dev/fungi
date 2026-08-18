@@ -101,11 +101,8 @@ impl Services {
         Ok(())
     }
 
-    pub(crate) fn service_discovery(&self) -> &ServiceDiscoveryControl {
-        &self.inner.remote.discovery
-    }
-
-    pub(crate) fn service_control(&self) -> &ServiceControlProtocolControl {
+    /// Low-level protocol handle for focused integration tests.
+    pub fn service_control(&self) -> &ServiceControlProtocolControl {
         &self.inner.remote.control
     }
 
