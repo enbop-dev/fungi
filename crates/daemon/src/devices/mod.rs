@@ -2,23 +2,22 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use fungi_config::devices::{DeviceInfo, DevicesConfig};
-use fungi_swarm::{PeerAddressSource, State};
-use libp2p::{Multiaddr, PeerId};
+use libp2p::PeerId;
 use parking_lot::Mutex;
 
-use crate::{DeviceServices, Services};
+use crate::{Connectivity, DeviceServices, Services};
 
 struct DevicesInner {
     local_device: DeviceInfo,
     config: Arc<Mutex<DevicesConfig>>,
-    swarm_state: State,
+    connectivity: Connectivity,
     services: Services,
 }
 
 pub(crate) struct DevicesInit {
     pub local_device: DeviceInfo,
     pub config: DevicesConfig,
-    pub swarm_state: State,
+    pub connectivity: Connectivity,
     pub services: Services,
 }
 
@@ -37,7 +36,7 @@ impl Devices {
             inner: Arc::new(DevicesInner {
                 local_device: init.local_device,
                 config: Arc::new(Mutex::new(init.config)),
-                swarm_state: init.swarm_state,
+                connectivity: init.connectivity,
                 services: init.services,
             }),
         }
@@ -124,23 +123,7 @@ impl Devices {
     }
 
     fn record_addresses(&self, device_info: &DeviceInfo) {
-        for address in &device_info.multiaddrs {
-            match address.parse::<Multiaddr>() {
-                Ok(multiaddr) => {
-                    self.inner.swarm_state.record_peer_address(
-                        device_info.peer_id,
-                        multiaddr,
-                        PeerAddressSource::DeviceConfig,
-                    );
-                }
-                Err(error) => log::debug!(
-                    "Ignoring invalid device multiaddr for peer {}: {} ({})",
-                    device_info.peer_id,
-                    address,
-                    error
-                ),
-            }
-        }
+        self.inner.connectivity.record_device_addresses(device_info);
     }
 }
 

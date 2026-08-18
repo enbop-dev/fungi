@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
+    Connectivity,
     controls::{
         DockerControl, NodeCapabilitiesControl, ServiceControlProtocolControl,
         ServiceDiscoveryControl, TcpTunnelingControl, mdns::MdnsControl,
@@ -29,8 +30,7 @@ pub struct FungiControl {
     services: Services,
     service_access: ServiceAccessManager,
     trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
-    swarm_control: SwarmControl,
-    mdns_control: MdnsControl,
+    connectivity: Connectivity,
     docker_control: Option<DockerControl>,
     node_capabilities_control: NodeCapabilitiesControl,
 }
@@ -41,8 +41,7 @@ pub(crate) struct FungiControlInit {
     pub services: Services,
     pub service_access: ServiceAccessManager,
     pub trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
-    pub swarm_control: SwarmControl,
-    pub mdns_control: MdnsControl,
+    pub connectivity: Connectivity,
     pub docker_control: Option<DockerControl>,
     pub node_capabilities_control: NodeCapabilitiesControl,
 }
@@ -55,8 +54,7 @@ impl FungiControl {
             services: init.services,
             service_access: init.service_access,
             trusted_devices_config: init.trusted_devices_config,
-            swarm_control: init.swarm_control,
-            mdns_control: init.mdns_control,
+            connectivity: init.connectivity,
             docker_control: init.docker_control,
             node_capabilities_control: init.node_capabilities_control,
         }
@@ -74,6 +72,10 @@ impl FungiControl {
         &self.services
     }
 
+    pub fn connectivity(&self) -> &Connectivity {
+        &self.connectivity
+    }
+
     pub fn devices_config(&self) -> Arc<Mutex<DevicesConfig>> {
         self.devices.config()
     }
@@ -83,7 +85,7 @@ impl FungiControl {
     }
 
     pub fn swarm_control(&self) -> &SwarmControl {
-        &self.swarm_control
+        self.connectivity.swarm_control()
     }
 
     pub fn docker_control(&self) -> Option<&DockerControl> {
@@ -115,7 +117,7 @@ impl FungiControl {
     }
 
     pub fn mdns_control(&self) -> &MdnsControl {
-        &self.mdns_control
+        self.connectivity.mdns_control()
     }
 
     /// Starts the one-shot restoration of saved remote service accesses.
