@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     devices::{Devices, DevicesInit},
-    service_access_manager::ServiceAccessManager,
+    service_accesses::ServiceAccesses,
     services::{Services, ServicesInit},
 };
 
@@ -167,8 +167,8 @@ impl FungiDaemon {
         );
         service_control_protocol_control.start()?;
 
-        let service_access_manager =
-            ServiceAccessManager::new(fungi_home.clone(), tcp_tunneling_control.clone());
+        let service_access =
+            ServiceAccesses::new(fungi_home.clone(), tcp_tunneling_control.clone());
         let services = Services::new(ServicesInit {
             local_device_id: device_info.peer_id,
             fungi_dir: fungi_home,
@@ -191,7 +191,7 @@ impl FungiDaemon {
             settings,
             devices,
             services,
-            service_access: service_access_manager,
+            service_access,
             inbound_access,
             connectivity,
         });

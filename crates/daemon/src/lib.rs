@@ -9,7 +9,7 @@ mod inbound_access;
 mod node_capabilities;
 mod recipes;
 pub mod runtime;
-mod service_access_manager;
+mod service_accesses;
 mod service_control;
 mod service_endpoints;
 mod service_state;
@@ -47,6 +47,7 @@ pub use runtime::{
     load_service_manifest_yaml_file, parse_service_manifest_yaml, peek_service_manifest_name,
     service_expose_endpoint_bindings, service_manifest_with_instance_name,
 };
+pub use service_accesses::ServiceAccesses;
 pub use service_control::{
     ServiceControlError, ServiceControlRequest, ServiceControlResponse, ServiceControlServiceRef,
 };

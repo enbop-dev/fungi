@@ -28,7 +28,7 @@ struct ServiceAccessRuntimeState {
     detached_services: BTreeSet<(String, String)>,
 }
 
-struct ServiceAccessManagerInner {
+struct ServiceAccessesInner {
     fungi_dir: PathBuf,
     tcp_tunneling: TcpTunnelingControl,
     /// Serializes preference read/modify/write sequences and listener replacement.
@@ -38,14 +38,14 @@ struct ServiceAccessManagerInner {
 
 /// Owns local service-access preferences and their active forwarding listeners.
 #[derive(Clone)]
-pub(crate) struct ServiceAccessManager {
-    inner: Arc<ServiceAccessManagerInner>,
+pub struct ServiceAccesses {
+    inner: Arc<ServiceAccessesInner>,
 }
 
-impl ServiceAccessManager {
+impl ServiceAccesses {
     pub(crate) fn new(fungi_dir: PathBuf, tcp_tunneling: TcpTunnelingControl) -> Self {
         Self {
-            inner: Arc::new(ServiceAccessManagerInner {
+            inner: Arc::new(ServiceAccessesInner {
                 fungi_dir,
                 tcp_tunneling,
                 operations: AsyncMutex::new(()),
@@ -54,11 +54,11 @@ impl ServiceAccessManager {
         }
     }
 
-    pub(crate) fn forwarding_rules(&self) -> Vec<(String, ForwardingRule)> {
+    pub fn forwarding_rules(&self) -> Vec<(String, ForwardingRule)> {
         self.inner.tcp_tunneling.get_forwarding_rules()
     }
 
-    pub(crate) async fn attach(
+    pub async fn attach(
         &self,
         peer_id: PeerId,
         service: DeviceService,
@@ -218,7 +218,7 @@ impl ServiceAccessManager {
         })
     }
 
-    pub(crate) fn detach(&self, peer_id: PeerId, service_name: &str) -> Result<()> {
+    pub fn detach(&self, peer_id: PeerId, service_name: &str) -> Result<()> {
         let peer_id = peer_id.to_string();
         self.inner
             .runtime_state
@@ -228,7 +228,7 @@ impl ServiceAccessManager {
         self.remove_matching_rules(&peer_id, Some(service_name))
     }
 
-    pub(crate) async fn forget_service(&self, peer_id: PeerId, service_name: &str) -> Result<()> {
+    pub async fn forget_service(&self, peer_id: PeerId, service_name: &str) -> Result<()> {
         let _operation = self.inner.operations.lock().await;
         let peer_id = peer_id.to_string();
         self.inner
@@ -242,7 +242,7 @@ impl ServiceAccessManager {
         Ok(())
     }
 
-    pub(crate) async fn forget_device(&self, peer_id: PeerId) -> Result<()> {
+    pub async fn forget_device(&self, peer_id: PeerId) -> Result<()> {
         let _operation = self.inner.operations.lock().await;
         let peer_id = peer_id.to_string();
         let preferences = self.local_preferences()?;
@@ -279,7 +279,7 @@ impl ServiceAccessManager {
             .collect())
     }
 
-    pub(crate) async fn list(&self, peer_id: Option<PeerId>) -> Result<Vec<ServiceAccess>> {
+    pub async fn list(&self, peer_id: Option<PeerId>) -> Result<Vec<ServiceAccess>> {
         let _operation = self.inner.operations.lock().await;
         let peer_filter = peer_id.map(|peer_id| peer_id.to_string());
         let mut grouped = BTreeMap::<(String, String), Vec<ServiceAccessEndpoint>>::new();
@@ -582,7 +582,7 @@ impl ServiceAccessManager {
 }
 
 pub(crate) async fn restore_saved_service_accesses(
-    service_access: ServiceAccessManager,
+    service_access: ServiceAccesses,
     services: Services,
 ) {
     service_access

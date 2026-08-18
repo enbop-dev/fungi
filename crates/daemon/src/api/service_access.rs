@@ -5,13 +5,13 @@ use anyhow::Result;
 use fungi_config::tcp_tunneling::ForwardingRule;
 use libp2p::PeerId;
 
-use crate::{FungiControl, service_access_manager::restore_saved_service_accesses};
+use crate::{FungiControl, service_accesses::restore_saved_service_accesses};
 
 use super::types::ServiceAccess;
 
 impl FungiControl {
     pub fn get_service_access_forwarding_rules(&self) -> Vec<(String, ForwardingRule)> {
-        self.service_access_manager().forwarding_rules()
+        self.service_access().forwarding_rules()
     }
 
     pub fn get_service_endpoint_listening_rules(
@@ -40,21 +40,18 @@ impl FungiControl {
             .map_err(|error| {
                 anyhow::anyhow!("failed to refresh remote service before attaching access: {error}")
             })?;
-        self.service_access_manager()
+        self.service_access()
             .attach(peer_id, service, entry, local_port)
             .await
     }
 
     pub async fn restore_saved_service_access_from_snapshots(&self) {
-        restore_saved_service_accesses(
-            self.service_access_manager().clone(),
-            self.services().clone(),
-        )
-        .await;
+        restore_saved_service_accesses(self.service_access().clone(), self.services().clone())
+            .await;
     }
 
     pub fn detach_service_access(&self, peer_id: PeerId, service_name: String) -> Result<()> {
-        self.service_access_manager().detach(peer_id, &service_name)
+        self.service_access().detach(peer_id, &service_name)
     }
 
     pub async fn restore_saved_service_access(
@@ -63,7 +60,7 @@ impl FungiControl {
         service_name: String,
     ) -> Result<()> {
         let saved_entries = self
-            .service_access_manager()
+            .service_access()
             .saved_entries(peer_id, &service_name)
             .await?;
         if saved_entries.is_empty() {
@@ -76,7 +73,7 @@ impl FungiControl {
             .inspect()
             .await?;
         for entry in saved_entries {
-            self.service_access_manager()
+            self.service_access()
                 .attach(peer_id, service.clone(), Some(entry), None)
                 .await?;
         }
@@ -84,24 +81,24 @@ impl FungiControl {
     }
 
     pub fn detach_service_access_by_match(&self, peer_id: PeerId, matcher: &str) -> Result<()> {
-        self.service_access_manager().detach(peer_id, matcher)
+        self.service_access().detach(peer_id, matcher)
     }
 
     pub async fn forget_service_access(&self, peer_id: PeerId, service_name: String) -> Result<()> {
-        self.service_access_manager()
+        self.service_access()
             .forget_service(peer_id, &service_name)
             .await
     }
 
     pub async fn forget_device_service_accesses(&self, peer_id: PeerId) -> Result<()> {
-        self.service_access_manager().forget_device(peer_id).await
+        self.service_access().forget_device(peer_id).await
     }
 
     pub async fn list_service_accesses(
         &self,
         peer_id: Option<PeerId>,
     ) -> Result<Vec<ServiceAccess>> {
-        self.service_access_manager().list(peer_id).await
+        self.service_access().list(peer_id).await
     }
 }
 
@@ -201,7 +198,7 @@ mod tests {
             .await?;
         let stale_records = client
             .daemon()
-            .service_access_manager()
+            .service_access()
             .preference_records()
             .await?;
 
@@ -211,7 +208,7 @@ mod tests {
             .await?;
         client
             .daemon()
-            .service_access_manager()
+            .service_access()
             .restore_records_from_cached_snapshots(&stale_records, client.daemon().services())
             .await;
 
@@ -254,7 +251,7 @@ mod tests {
             .await?;
         let stale_records = client
             .daemon()
-            .service_access_manager()
+            .service_access()
             .preference_records()
             .await?;
 
@@ -269,7 +266,7 @@ mod tests {
             .await?;
         client
             .daemon()
-            .service_access_manager()
+            .service_access()
             .restore_records_from_cached_snapshots(&stale_records, client.daemon().services())
             .await;
 
@@ -303,7 +300,7 @@ mod tests {
             .await?;
         let stale_records = client
             .daemon()
-            .service_access_manager()
+            .service_access()
             .preference_records()
             .await?;
 
@@ -312,7 +309,7 @@ mod tests {
             .detach_service_access(peer_id, service_name.to_string())?;
         client
             .daemon()
-            .service_access_manager()
+            .service_access()
             .restore_records_from_cached_snapshots(&stale_records, client.daemon().services())
             .await;
 

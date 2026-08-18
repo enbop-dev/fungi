@@ -336,7 +336,7 @@ impl FungiControl {
         if !removed {
             anyhow::bail!("cached service not found for device: {name}");
         }
-        self.service_access_manager()
+        self.service_access()
             .forget_service(device_id, name)
             .await?;
         Ok(ServiceControlResponse::success_forgotten_locally(
@@ -492,7 +492,7 @@ impl FungiControl {
     ) -> Result<ServiceControlResponse> {
         let service = self.devices().peer(peer_id).services().service(name);
         service.stop().await?;
-        self.service_access_manager()
+        self.service_access()
             .detach(peer_id, service.name())
             .with_context(|| {
                 format!(
@@ -513,7 +513,7 @@ impl FungiControl {
     ) -> Result<ServiceControlResponse> {
         let service = self.devices().peer(peer_id).services().service(name);
         service.remove().await?;
-        self.service_access_manager()
+        self.service_access()
             .forget_service(peer_id, service.name())
             .await
             .with_context(|| {

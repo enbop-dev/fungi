@@ -14,21 +14,20 @@ use crate::{
     },
     devices::{DeviceHandle, Devices},
     runtime::RuntimeControl,
-    service_access_manager::{ServiceAccessManager, restore_saved_service_accesses},
+    service_accesses::{ServiceAccesses, restore_saved_service_accesses},
     services::{ServiceHandle, ServiceKey, Services},
 };
 
 /// Cloneable entry point for all daemon application APIs.
 ///
-/// `FungiControl` owns only shared handles. The unique daemon tasks and their lifecycle remain
-/// owned by [`crate::FungiDaemon`]. The low-level fields below are transitional and will move into
-/// their corresponding domain handles as the refactor progresses.
+/// `FungiControl` owns only shared domain handles. The unique daemon tasks and their lifecycle
+/// remain owned by [`crate::FungiDaemon`].
 #[derive(Clone)]
 pub struct FungiControl {
     settings: Settings,
     devices: Devices,
     services: Services,
-    service_access: ServiceAccessManager,
+    service_access: ServiceAccesses,
     inbound_access: InboundAccessPolicy,
     connectivity: Connectivity,
 }
@@ -37,7 +36,7 @@ pub(crate) struct FungiControlInit {
     pub settings: Settings,
     pub devices: Devices,
     pub services: Services,
-    pub service_access: ServiceAccessManager,
+    pub service_access: ServiceAccesses,
     pub inbound_access: InboundAccessPolicy,
     pub connectivity: Connectivity,
 }
@@ -107,7 +106,7 @@ impl FungiControl {
         self.services.tcp_tunneling()
     }
 
-    pub(crate) fn service_access_manager(&self) -> &ServiceAccessManager {
+    pub fn service_access(&self) -> &ServiceAccesses {
         &self.service_access
     }
 
