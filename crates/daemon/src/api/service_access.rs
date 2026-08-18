@@ -5,11 +5,11 @@ use anyhow::Result;
 use fungi_config::tcp_tunneling::ForwardingRule;
 use libp2p::PeerId;
 
-use crate::{FungiDaemon, service_access_manager::restore_saved_service_accesses};
+use crate::{FungiControl, service_access_manager::restore_saved_service_accesses};
 
 use super::types::ServiceAccess;
 
-impl FungiDaemon {
+impl FungiControl {
     pub fn get_service_access_forwarding_rules(&self) -> Vec<(String, ForwardingRule)> {
         self.service_access_manager().forwarding_rules()
     }

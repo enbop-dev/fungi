@@ -16,7 +16,7 @@ use crate::service_endpoints::{
 };
 use crate::service_state::DesiredServiceState;
 use crate::{
-    FungiDaemon, LocalRuntimeStatus, ManifestResolutionPolicy, NodeCapabilities,
+    FungiControl, LocalRuntimeStatus, ManifestResolutionPolicy, NodeCapabilities,
     ResolvedServiceRecipe, ServiceControlResponse, ServiceRecipeDetail, ServiceRecipeRuntime,
     ServiceRecipeSummary, build_local_node_capabilities, build_local_runtime_status,
 };
@@ -43,7 +43,7 @@ impl DeviceServiceSnapshotSource {
     }
 }
 
-impl FungiDaemon {
+impl FungiControl {
     pub fn docker_enabled(&self) -> bool {
         self.config().lock().runtime.docker_enabled()
     }

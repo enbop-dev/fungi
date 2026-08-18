@@ -2,9 +2,9 @@ use anyhow::Result;
 use fungi_config::devices::DeviceInfo;
 use libp2p::PeerId;
 
-use crate::FungiDaemon;
+use crate::FungiControl;
 
-impl FungiDaemon {
+impl FungiControl {
     pub async fn mdns_get_local_devices(&self) -> Result<Vec<DeviceInfo>> {
         let local_devices = self
             .mdns_control()

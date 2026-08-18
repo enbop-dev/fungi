@@ -1,4 +1,5 @@
 mod api;
+mod control;
 mod controls;
 mod daemon;
 mod devices;
@@ -19,6 +20,7 @@ pub mod test_support;
 
 pub use api::{ServiceAccess, ServiceAccessEndpoint};
 use clap::Parser;
+pub use control::FungiControl;
 pub use controls::{DEFAULT_REMOTE_SERVICE_LOG_TAIL, MAX_REMOTE_SERVICE_LOG_TAIL};
 pub use daemon::FungiDaemon;
 pub use devices::{DeviceHandle, DeviceKind, DeviceServices, Devices, ServiceHandle};

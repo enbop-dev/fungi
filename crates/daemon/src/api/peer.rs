@@ -2,14 +2,14 @@ use anyhow::Result;
 use fungi_swarm::{ConnectionDirection, ConnectionRecord};
 use libp2p::{Multiaddr, PeerId, StreamProtocol, multiaddr::Protocol};
 
-use crate::FungiDaemon;
+use crate::FungiControl;
 
 use super::types::{
     ActiveStreamSnapshot, ConnectionSnapshot, ExternalAddressSnapshot, PeerAddressSnapshot,
     ProtocolStreamCountSnapshot, RelayEndpointStatusSnapshot,
 };
 
-impl FungiDaemon {
+impl FungiControl {
     fn build_connection_snapshot(
         &self,
         peer_id: PeerId,

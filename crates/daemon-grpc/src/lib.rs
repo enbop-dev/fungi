@@ -8,7 +8,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -153,13 +152,13 @@ impl PingPeerError {
 }
 
 pub async fn start_grpc_server(
-    daemon: fungi_daemon::FungiDaemon,
+    control: fungi_daemon::FungiControl,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
     tonic::transport::Server::builder()
         .add_service(
             fungi_daemon_grpc::fungi_daemon_server::FungiDaemonServer::new(
-                FungiDaemonRpcImpl::new(daemon),
+                FungiDaemonRpcImpl::new(control),
             ),
         )
         .serve_with_incoming(TcpListenerStream::new(listener))
@@ -168,14 +167,12 @@ pub async fn start_grpc_server(
 }
 
 pub struct FungiDaemonRpcImpl {
-    inner: Arc<fungi_daemon::FungiDaemon>,
+    inner: fungi_daemon::FungiControl,
 }
 
 impl FungiDaemonRpcImpl {
-    pub fn new(inner: fungi_daemon::FungiDaemon) -> Self {
-        Self {
-            inner: Arc::new(inner),
-        }
+    pub fn new(inner: fungi_daemon::FungiControl) -> Self {
+        Self { inner }
     }
 }
 

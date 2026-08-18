@@ -51,7 +51,7 @@ use fungi_config::{
 use libp2p::{Multiaddr, PeerId, identity::Keypair, multiaddr::Protocol};
 use tempfile::TempDir;
 
-use crate::{DaemonArgs, FungiDaemon};
+use crate::{DaemonArgs, FungiControl, FungiDaemon};
 
 type ConfigMutator = Box<dyn Fn(&mut FungiConfig) + Send + Sync + 'static>;
 
@@ -207,7 +207,7 @@ impl TestDaemon {
 
     /// The [`PeerId`] of this daemon.
     pub fn peer_id(&self) -> PeerId {
-        self.inner.swarm_control().local_peer_id()
+        self.inner.control_ref().swarm_control().local_peer_id()
     }
 
     /// A `Multiaddr` that can be dialled by another daemon on the same host.
@@ -221,9 +221,12 @@ impl TestDaemon {
             .with(Protocol::P2p(peer_id))
     }
 
-    /// Borrow the inner daemon for calling any daemon API directly.
-    pub fn daemon(&self) -> &FungiDaemon {
-        &self.inner
+    /// Borrow the daemon's application API.
+    ///
+    /// The method name remains `daemon()` so existing test scenarios stay readable while the
+    /// production API separates daemon lifecycle ownership from the cloneable control facade.
+    pub fn daemon(&self) -> &FungiControl {
+        self.inner.control_ref()
     }
 
     /// Return the isolated Fungi home used by this daemon.
@@ -233,7 +236,7 @@ impl TestDaemon {
 
     /// Borrow the underlying [`fungi_swarm::SwarmControl`].
     pub fn swarm_control(&self) -> &fungi_swarm::SwarmControl {
-        self.inner.swarm_control()
+        self.inner.control_ref().swarm_control()
     }
 
     // ── Connection helpers ────────────────────────────────────────────────

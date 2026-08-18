@@ -2,9 +2,9 @@ use anyhow::Result;
 use fungi_config::EffectiveRelayAddress;
 use libp2p::Multiaddr;
 
-use crate::FungiDaemon;
+use crate::FungiControl;
 
-impl FungiDaemon {
+impl FungiControl {
     pub fn relay_enabled(&self) -> bool {
         self.config().lock().network.relay_enabled
     }

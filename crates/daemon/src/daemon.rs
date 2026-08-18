@@ -9,6 +9,7 @@ use std::{
 
 use crate::{
     DaemonArgs,
+    control::{FungiControl, FungiControlInit},
     controls::{
         DockerControl, NodeCapabilitiesControl, ServiceControlProtocolControl,
         ServiceDiscoveryControl, TcpTunnelingControl, mdns::MdnsControl,
@@ -32,98 +33,25 @@ use tokio::task::JoinHandle;
 
 use crate::{
     devices::{Devices, DevicesInit},
-    service_access_manager::{ServiceAccessManager, restore_saved_service_accesses},
+    service_access_manager::ServiceAccessManager,
 };
 
 const DIRECT_ADDRESS_CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
 #[allow(dead_code)]
-struct TaskHandles {
+pub struct FungiDaemon {
+    control: FungiControl,
     swarm_task: JoinHandle<()>,
     direct_address_cache_sync_task: JoinHandle<()>,
 }
 
-#[allow(dead_code)]
-pub struct FungiDaemon {
-    config: Arc<Mutex<FungiConfig>>,
-    devices: Devices,
-    trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
-    direct_address_cache: Arc<Mutex<DirectAddressCache>>,
-    args: DaemonArgs,
-
-    swarm_control: SwarmControl,
-    mdns_control: MdnsControl,
-    docker_control: Option<DockerControl>,
-    node_capabilities_control: NodeCapabilitiesControl,
-
-    task_handles: TaskHandles,
-}
-
 impl FungiDaemon {
-    pub fn config(&self) -> Arc<Mutex<FungiConfig>> {
-        self.config.clone()
+    pub fn control(&self) -> FungiControl {
+        self.control.clone()
     }
 
-    pub fn devices(&self) -> &Devices {
-        &self.devices
-    }
-
-    pub fn devices_config(&self) -> Arc<Mutex<DevicesConfig>> {
-        self.devices.config()
-    }
-
-    pub fn trusted_devices(&self) -> Arc<Mutex<TrustedDevicesConfig>> {
-        self.trusted_devices_config.clone()
-    }
-
-    pub fn swarm_control(&self) -> &SwarmControl {
-        &self.swarm_control
-    }
-
-    pub fn docker_control(&self) -> Option<&DockerControl> {
-        self.docker_control.as_ref()
-    }
-
-    pub fn tcp_tunneling_control(&self) -> &TcpTunnelingControl {
-        self.devices.tcp_tunneling()
-    }
-
-    pub(crate) fn service_access_manager(&self) -> &ServiceAccessManager {
-        self.devices.service_access()
-    }
-
-    pub fn runtime_control(&self) -> &RuntimeControl {
-        self.devices.runtime()
-    }
-
-    pub fn service_discovery_control(&self) -> &ServiceDiscoveryControl {
-        self.devices.service_discovery()
-    }
-
-    pub fn node_capabilities_control(&self) -> &NodeCapabilitiesControl {
-        &self.node_capabilities_control
-    }
-
-    pub fn service_control_protocol_control(&self) -> &ServiceControlProtocolControl {
-        self.devices.service_control()
-    }
-
-    /// Starts the one-shot restoration of saved remote service accesses.
-    ///
-    /// The task owns only the two domain handles it needs, so the daemon and its RPC server do not
-    /// need an additional outer `Arc`.
-    pub fn spawn_saved_service_access_restore(&self) -> JoinHandle<()> {
-        let service_access = self.devices.service_access().clone();
-        let devices = self.devices.clone();
-        tokio::spawn(async move {
-            log::info!("Restoring saved service access in the background...");
-            restore_saved_service_accesses(service_access, devices).await;
-            log::info!("Finished restoring saved service access");
-        })
-    }
-
-    pub fn mdns_control(&self) -> &MdnsControl {
-        &self.mdns_control
+    pub(crate) fn control_ref(&self) -> &FungiControl {
+        &self.control
     }
 
     pub async fn start(fungi_dir: PathBuf, args: DaemonArgs) -> Result<Self> {
@@ -148,7 +76,7 @@ impl FungiDaemon {
     }
 
     pub async fn start_with(
-        args: DaemonArgs,
+        _args: DaemonArgs,
         config: FungiConfig,
         keypair: Keypair,
         devices_config: DevicesConfig,
@@ -256,87 +184,89 @@ impl FungiDaemon {
 
         let trusted_devices_config = Arc::new(Mutex::new(trusted_devices_config));
         let direct_address_cache = Arc::new(Mutex::new(direct_address_cache));
-        let task_handles = TaskHandles {
-            swarm_task,
-            direct_address_cache_sync_task: spawn_direct_address_cache_sync_task(
-                swarm_control.clone(),
-                direct_address_cache.clone(),
-            ),
-        };
-        let daemon = Self {
+        let direct_address_cache_sync_task = spawn_direct_address_cache_sync_task(
+            swarm_control.clone(),
+            direct_address_cache.clone(),
+        );
+        let control = FungiControl::new(FungiControlInit {
             config: shared_config,
             devices,
             trusted_devices_config,
-            direct_address_cache,
-            args,
             swarm_control,
             mdns_control,
             docker_control,
             node_capabilities_control,
-            task_handles,
-        };
+        });
 
-        daemon.restore_service_endpoint_listeners().await?;
+        restore_service_endpoint_listeners(&control).await?;
 
-        Ok(daemon)
+        Ok(Self {
+            control,
+            swarm_task,
+            direct_address_cache_sync_task,
+        })
     }
 
-    pub async fn wait_all(self) {
-        tokio::select! {
-            _ = self.task_handles.swarm_task => {
-                println!("Swarm task is closed");
-            },
-            // _ = self.task_handles.daemon_rpc_task => {
-            //     println!("Daemon RPC task is closed");
-            // },
+    pub async fn wait(&mut self) -> Result<()> {
+        match (&mut self.swarm_task).await {
+            Ok(()) => bail!("swarm task stopped unexpectedly"),
+            Err(error) => Err(anyhow::anyhow!("swarm task failed: {error}")),
         }
     }
 
-    async fn restore_service_endpoint_listeners(&self) -> Result<()> {
-        let mut listening_rules = self.tcp_tunneling_control().get_listening_rules();
-        let mut restored_protocols = std::collections::BTreeSet::new();
+    pub async fn shutdown(mut self) {
+        self.swarm_task.abort();
+        self.direct_address_cache_sync_task.abort();
+        let _ = (&mut self.swarm_task).await;
+        let _ = (&mut self.direct_address_cache_sync_task).await;
+    }
+}
 
-        for service in self.runtime_control().list_services().await? {
-            if !service.status.is_running() {
-                continue;
-            }
+impl Drop for FungiDaemon {
+    fn drop(&mut self) {
+        self.swarm_task.abort();
+        self.direct_address_cache_sync_task.abort();
+    }
+}
 
-            for endpoint in service.exposed_endpoints {
-                restore_service_endpoint_listener(
-                    self.tcp_tunneling_control(),
-                    &mut listening_rules,
-                    &mut restored_protocols,
-                    endpoint.host_port,
-                    endpoint.protocol,
-                )
-                .await;
-            }
+async fn restore_service_endpoint_listeners(control: &FungiControl) -> Result<()> {
+    let mut listening_rules = control.tcp_tunneling_control().get_listening_rules();
+    let mut restored_protocols = std::collections::BTreeSet::new();
+
+    for service in control.runtime_control().list_services().await? {
+        if !service.status.is_running() {
+            continue;
         }
 
-        for manifest in self.runtime_control().desired_running_service_manifests() {
-            for endpoint in crate::runtime::service_expose_endpoint_bindings(&manifest) {
-                restore_service_endpoint_listener(
-                    self.tcp_tunneling_control(),
-                    &mut listening_rules,
-                    &mut restored_protocols,
-                    endpoint.host_port,
-                    endpoint.protocol,
-                )
-                .await;
-            }
+        for endpoint in service.exposed_endpoints {
+            restore_service_endpoint_listener(
+                control.tcp_tunneling_control(),
+                &mut listening_rules,
+                &mut restored_protocols,
+                endpoint.host_port,
+                endpoint.protocol,
+            )
+            .await;
         }
-
-        Ok(())
     }
 
-    pub fn config_fungi_dir(&self) -> Result<PathBuf> {
-        self.config
-            .lock()
-            .config_file_path()
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| anyhow::anyhow!("config file has no parent directory"))
+    for manifest in control
+        .runtime_control()
+        .desired_running_service_manifests()
+    {
+        for endpoint in crate::runtime::service_expose_endpoint_bindings(&manifest) {
+            restore_service_endpoint_listener(
+                control.tcp_tunneling_control(),
+                &mut listening_rules,
+                &mut restored_protocols,
+                endpoint.host_port,
+                endpoint.protocol,
+            )
+            .await;
+        }
     }
+
+    Ok(())
 }
 
 fn hydrate_device_addresses(state: &State, devices_config: &DevicesConfig) {
