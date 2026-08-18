@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::{Context as _, Result};
 use fungi_config::service_cache::DeviceServiceSnapshotCache;
@@ -14,6 +20,8 @@ use crate::{
     },
     service_state::DesiredServiceState,
 };
+
+const REMOTE_SERVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct LocalServiceBackend {
     runtime: RuntimeControl,
@@ -167,21 +175,24 @@ impl DeviceServices {
         } else {
             let control = self.services.inner.remote.control.clone();
             let discovery = self.services.inner.remote.discovery.clone();
-            let (managed_response, published) = tokio::try_join!(
-                async move {
-                    control.list_peer_services(peer_id).await.with_context(|| {
-                        format!("failed to refresh managed services for device {peer_id}")
-                    })
-                },
-                async move {
-                    discovery
-                        .list_peer_services(peer_id)
-                        .await
-                        .with_context(|| {
-                            format!("failed to refresh published services for device {peer_id}")
+            let (managed_response, published) = with_remote_refresh_timeout(async move {
+                tokio::try_join!(
+                    async move {
+                        control.list_peer_services(peer_id).await.with_context(|| {
+                            format!("failed to refresh managed services for device {peer_id}")
                         })
-                },
-            )?;
+                    },
+                    async move {
+                        discovery
+                            .list_peer_services(peer_id)
+                            .await
+                            .with_context(|| {
+                                format!("failed to refresh published services for device {peer_id}")
+                            })
+                    },
+                )
+            })
+            .await?;
             let managed = managed_response
                 .services_json
                 .as_deref()
@@ -536,4 +547,32 @@ fn find_service(snapshot: DeviceServiceSnapshot, name: &str) -> Option<DeviceSer
         .services
         .into_iter()
         .find(|service| service.name == name)
+}
+
+async fn with_remote_refresh_timeout<T>(refresh: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(REMOTE_SERVICE_REFRESH_TIMEOUT, refresh)
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "remote service refresh timed out after {} seconds",
+                REMOTE_SERVICE_REFRESH_TIMEOUT.as_secs()
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_refresh_times_out_after_fifteen_seconds() {
+        let result = with_remote_refresh_timeout(std::future::pending::<Result<()>>()).await;
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("timed out after 15 seconds")
+        );
+    }
 }

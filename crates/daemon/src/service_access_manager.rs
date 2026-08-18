@@ -4,7 +4,6 @@ use std::{
     net::TcpListener as StdTcpListener,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
 
 use anyhow::{Result, bail};
@@ -18,11 +17,9 @@ use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
-    DeviceService, DeviceServiceEndpoint, DeviceServiceSnapshot, ServiceAccess,
-    ServiceAccessEndpoint, Services, controls::TcpTunnelingControl,
+    DeviceService, DeviceServiceEndpoint, ServiceAccess, ServiceAccessEndpoint, Services,
+    controls::TcpTunnelingControl,
 };
-
-const STARTUP_SERVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 struct ServiceAccessRuntimeState {
@@ -636,24 +633,14 @@ pub(crate) async fn restore_saved_service_accesses(
 async fn refresh_devices<F, Fut>(
     peer_ids: impl IntoIterator<Item = PeerId>,
     refresh: F,
-) -> Vec<(PeerId, Result<DeviceServiceSnapshot>)>
+) -> Vec<(PeerId, Result<crate::DeviceServiceSnapshot>)>
 where
     F: Fn(PeerId) -> Fut,
-    Fut: Future<Output = Result<DeviceServiceSnapshot>>,
+    Fut: Future<Output = Result<crate::DeviceServiceSnapshot>>,
 {
     join_all(peer_ids.into_iter().map(|peer_id| {
         let refresh = &refresh;
-        async move {
-            let result = tokio::time::timeout(STARTUP_SERVICE_REFRESH_TIMEOUT, refresh(peer_id))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(anyhow::anyhow!(
-                        "timed out after {} seconds",
-                        STARTUP_SERVICE_REFRESH_TIMEOUT.as_secs()
-                    ))
-                });
-            (peer_id, result)
-        }
+        async move { (peer_id, refresh(peer_id).await) }
     }))
     .await
 }
@@ -722,7 +709,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn startup_refresh_polls_all_devices_concurrently() {
+    async fn startup_refresh_polls_all_devices_concurrently_without_a_cap() {
         let device_count = 32;
         let started = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Semaphore::new(0));
@@ -731,21 +718,21 @@ mod tests {
             .collect::<Vec<_>>();
         let refresh_started = started.clone();
         let refresh_release = release.clone();
-        let refresh_task = tokio::spawn(refresh_devices(peer_ids, move |_| {
+        let refresh_task = tokio::spawn(refresh_devices(peer_ids, move |peer_id| {
             let started = refresh_started.clone();
             let release = refresh_release.clone();
             async move {
                 started.fetch_add(1, Ordering::SeqCst);
                 let _permit = release.acquire().await.unwrap();
-                Ok(DeviceServiceSnapshot {
-                    peer_id: PeerId::random().to_string(),
+                Ok(crate::DeviceServiceSnapshot {
+                    peer_id: peer_id.to_string(),
                     services: Vec::new(),
                     updated_at: std::time::SystemTime::now(),
                 })
             }
         }));
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while started.load(Ordering::SeqCst) != device_count {
                 tokio::task::yield_now().await;
             }
@@ -756,16 +743,5 @@ mod tests {
         release.add_permits(device_count);
         let results = refresh_task.await.unwrap();
         assert_eq!(results.len(), device_count);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn startup_refresh_times_out_each_device_after_fifteen_seconds() {
-        let results = refresh_devices([PeerId::random()], |_| {
-            std::future::pending::<Result<DeviceServiceSnapshot>>()
-        })
-        .await;
-
-        let error = results.into_iter().next().unwrap().1.unwrap_err();
-        assert!(error.to_string().contains("timed out after 15 seconds"));
     }
 }

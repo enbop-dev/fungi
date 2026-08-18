@@ -277,35 +277,14 @@ impl FungiControl {
         Ok(resolved)
     }
 
-    pub fn load_device_service_snapshot(
-        &self,
-        device_id: PeerId,
-    ) -> Result<Option<DeviceServiceSnapshot>> {
-        self.devices().peer(device_id).services().snapshot()
-    }
-
-    pub async fn refresh_device_service_snapshot(
-        &self,
-        device_id: PeerId,
-    ) -> Result<DeviceServiceSnapshot> {
-        self.devices().peer(device_id).services().refresh().await
-    }
-
-    pub fn save_device_service_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
-        self.services().save_snapshot(snapshot)
-    }
-
-    pub fn remove_device_service_snapshot(&self, device_id: PeerId) -> Result<bool> {
-        self.services().remove_snapshot(device_id)
-    }
-
     pub async fn get_device_service_snapshot(
         &self,
         device_id: PeerId,
         refresh: bool,
     ) -> Result<DeviceServiceSnapshotLookup> {
+        let device_services = self.services().for_device(device_id);
         if refresh {
-            match self.refresh_device_service_snapshot(device_id).await {
+            match device_services.refresh().await {
                 Ok(snapshot) => {
                     return Ok(DeviceServiceSnapshotLookup {
                         snapshot,
@@ -314,7 +293,7 @@ impl FungiControl {
                     });
                 }
                 Err(error) => {
-                    if let Some(snapshot) = self.load_device_service_snapshot(device_id)? {
+                    if let Some(snapshot) = device_services.snapshot()? {
                         return Ok(DeviceServiceSnapshotLookup {
                             snapshot,
                             source: DeviceServiceSnapshotSource::Cache,
@@ -334,7 +313,7 @@ impl FungiControl {
             }
         }
 
-        if let Some(snapshot) = self.load_device_service_snapshot(device_id)? {
+        if let Some(snapshot) = device_services.snapshot()? {
             Ok(DeviceServiceSnapshotLookup {
                 snapshot,
                 source: DeviceServiceSnapshotSource::Cache,
@@ -686,12 +665,7 @@ mod tests {
                 .is_some()
         );
 
-        assert!(
-            daemon
-                .daemon()
-                .remove_device_service_snapshot(peer_id)
-                .unwrap()
-        );
+        assert!(daemon.daemon().services().remove_snapshot(peer_id).unwrap());
         assert!(
             cache
                 .get_device_snapshot_json(&peer_id.to_string())
