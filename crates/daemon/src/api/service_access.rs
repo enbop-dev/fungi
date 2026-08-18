@@ -27,11 +27,21 @@ impl FungiControl {
         entry: Option<String>,
         local_port: Option<u16>,
     ) -> Result<ServiceAccess> {
-        self.devices()
-            .peer(peer_id)
+        anyhow::ensure!(
+            peer_id != self.devices().local().id(),
+            "local services do not use remote service access listeners"
+        );
+        let service = self
             .services()
+            .for_device(peer_id)
             .service(service_name)
-            .attach_access(entry, local_port)
+            .inspect()
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to refresh remote service before attaching access: {error}")
+            })?;
+        self.service_access_manager()
+            .attach(peer_id, service, entry, local_port)
             .await
     }
 
@@ -44,11 +54,7 @@ impl FungiControl {
     }
 
     pub fn detach_service_access(&self, peer_id: PeerId, service_name: String) -> Result<()> {
-        self.devices()
-            .peer(peer_id)
-            .services()
-            .service(service_name)
-            .detach_access()
+        self.service_access_manager().detach(peer_id, &service_name)
     }
 
     pub async fn restore_saved_service_access(
@@ -60,31 +66,30 @@ impl FungiControl {
             .service_access_manager()
             .saved_entries(peer_id, &service_name)
             .await?;
+        if saved_entries.is_empty() {
+            return Ok(());
+        }
+        let service = self
+            .services()
+            .for_device(peer_id)
+            .service(service_name)
+            .inspect()
+            .await?;
         for entry in saved_entries {
-            self.devices()
-                .peer(peer_id)
-                .services()
-                .service(service_name.clone())
-                .attach_access(Some(entry), None)
+            self.service_access_manager()
+                .attach(peer_id, service.clone(), Some(entry), None)
                 .await?;
         }
         Ok(())
     }
 
     pub fn detach_service_access_by_match(&self, peer_id: PeerId, matcher: &str) -> Result<()> {
-        self.devices()
-            .peer(peer_id)
-            .services()
-            .service(matcher)
-            .detach_access()
+        self.service_access_manager().detach(peer_id, matcher)
     }
 
     pub async fn forget_service_access(&self, peer_id: PeerId, service_name: String) -> Result<()> {
-        self.devices()
-            .peer(peer_id)
-            .services()
-            .service(service_name)
-            .forget_access()
+        self.service_access_manager()
+            .forget_service(peer_id, &service_name)
             .await
     }
 

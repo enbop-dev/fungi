@@ -1,15 +1,14 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use fungi_config::service_cache::DeviceServiceSnapshotCache;
 use libp2p::PeerId;
 
 use crate::{
-    DeviceService, DeviceServiceSnapshot, ManifestResolutionPolicy, ServiceAccess, ServiceInstance,
-    ServiceLogs, ServiceLogsOptions,
+    DeviceService, DeviceServiceSnapshot, ManifestResolutionPolicy, ServiceInstance, ServiceLogs,
+    ServiceLogsOptions,
     controls::{ServiceControlProtocolControl, ServiceDiscoveryControl, TcpTunnelingControl},
     runtime::RuntimeControl,
-    service_access_manager::ServiceAccessManager,
     service_endpoints::{
         sync_service_endpoint_listeners_by_name, sync_service_endpoint_listeners_for_manifest,
     },
@@ -31,11 +30,6 @@ struct ServicesInner {
     fungi_dir: PathBuf,
     local: LocalServiceBackend,
     remote: RemoteServiceBackend,
-
-    // Transitional dependency. Service access becomes an independent FungiControl module in the
-    // next refactor step; keeping the handle here preserves current ServiceHandle behavior without
-    // leaving it in Devices.
-    service_access: ServiceAccessManager,
 }
 
 pub(crate) struct ServicesInit {
@@ -45,7 +39,6 @@ pub(crate) struct ServicesInit {
     pub service_discovery: ServiceDiscoveryControl,
     pub service_control: ServiceControlProtocolControl,
     pub tcp_tunneling: TcpTunnelingControl,
-    pub service_access: ServiceAccessManager,
 }
 
 /// Shared service domain for local and remote devices.
@@ -68,7 +61,6 @@ impl Services {
                     discovery: init.service_discovery,
                     control: init.service_control,
                 },
-                service_access: init.service_access,
             }),
         }
     }
@@ -385,25 +377,15 @@ impl ServiceHandle {
             return Ok(());
         }
 
-        let response = self
-            .services
+        self.services
             .inner
             .remote
             .control
             .start_peer_service(self.key.device_id, self.key.service_name.clone())
             .await?;
-        let service_name = response
-            .service
-            .as_ref()
-            .map(|service| service.name.clone())
-            .unwrap_or_else(|| self.key.service_name.clone());
-        self.restore_saved_access_after_start(&service_name)
-            .await
-            .with_context(|| {
-                format!(
-                    "remote service started, but failed to restore saved local access listeners for {service_name}"
-                )
-            })?;
+        self.device_services()
+            .refresh_or_keep_after_mutation()
+            .await;
         Ok(())
     }
 
@@ -425,25 +407,12 @@ impl ServiceHandle {
             return Ok(());
         }
 
-        let response = self
-            .services
+        self.services
             .inner
             .remote
             .control
             .stop_peer_service(self.key.device_id, self.key.service_name.clone())
             .await?;
-        let service_name = response
-            .service
-            .as_ref()
-            .map(|service| service.name.as_str())
-            .unwrap_or(self.key.service_name.as_str());
-        self.services.inner.service_access
-            .detach(self.key.device_id, service_name)
-            .with_context(|| {
-                format!(
-                    "remote service stopped, but failed to disconnect local access listeners for {service_name}"
-                )
-            })?;
         self.device_services()
             .refresh_or_keep_after_mutation()
             .await;
@@ -473,26 +442,12 @@ impl ServiceHandle {
             return Ok(());
         }
 
-        let response = self
-            .services
+        self.services
             .inner
             .remote
             .control
             .remove_peer_service(self.key.device_id, self.key.service_name.clone())
             .await?;
-        let service_name = response
-            .service
-            .as_ref()
-            .map(|service| service.name.as_str())
-            .unwrap_or(self.key.service_name.as_str());
-        self.services.inner.service_access
-            .forget_service(self.key.device_id, service_name)
-            .await
-            .with_context(|| {
-                format!(
-                    "remote service removed, but failed to forget local access records for {service_name}"
-                )
-            })?;
         self.device_services()
             .refresh_or_keep_after_mutation()
             .await;
@@ -534,88 +489,9 @@ impl ServiceHandle {
         })
     }
 
-    pub async fn attach_access(
-        &self,
-        entry: Option<String>,
-        local_port: Option<u16>,
-    ) -> Result<ServiceAccess> {
-        self.ensure_remote_access()?;
-        let snapshot = self.device_services().refresh().await.map_err(|error| {
-            anyhow::anyhow!("failed to refresh remote service before attaching access: {error}")
-        })?;
-        let service = find_service(snapshot, &self.key.service_name).ok_or_else(|| {
-            anyhow::anyhow!("remote service not found: {}", self.key.service_name)
-        })?;
-        self.services
-            .inner
-            .service_access
-            .attach(self.key.device_id, service, entry, local_port)
-            .await
-    }
-
-    pub fn detach_access(&self) -> Result<()> {
-        self.ensure_remote_access()?;
-        self.services
-            .inner
-            .service_access
-            .detach(self.key.device_id, &self.key.service_name)
-    }
-
-    pub async fn forget_access(&self) -> Result<()> {
-        self.ensure_remote_access()?;
-        self.services
-            .inner
-            .service_access
-            .forget_service(self.key.device_id, &self.key.service_name)
-            .await
-    }
-
-    pub async fn forget_cached_observation(&self) -> Result<bool> {
-        self.ensure_remote_access()?;
-        let removed = self
-            .device_services()
-            .remove_cached_service(&self.key.service_name)?;
-        if removed {
-            self.forget_access().await?;
-        }
-        Ok(removed)
-    }
-
-    async fn restore_saved_access_after_start(&self, service_name: &str) -> Result<()> {
-        let saved_entries = self
-            .services
-            .inner
-            .service_access
-            .saved_entries(self.key.device_id, service_name)
-            .await?;
-        let snapshot = self.device_services().refresh().await;
-        if saved_entries.is_empty() {
-            if let Err(error) = snapshot {
-                log::warn!(
-                    "Failed to refresh device service snapshot for device {} after remote mutation: {error}",
-                    self.key.device_id
-                );
-            }
-            return Ok(());
-        }
-
-        let service = find_service(snapshot?, service_name)
-            .ok_or_else(|| anyhow::anyhow!("remote service not found: {service_name}"))?;
-        for entry in saved_entries {
-            self.services
-                .inner
-                .service_access
-                .attach(self.key.device_id, service.clone(), Some(entry), None)
-                .await?;
-        }
-        Ok(())
-    }
-
-    fn ensure_remote_access(&self) -> Result<()> {
-        if self.is_local() {
-            bail!("local services do not use remote service access listeners");
-        }
-        Ok(())
+    pub(crate) fn forget_cached_observation(&self) -> Result<bool> {
+        self.device_services()
+            .remove_cached_service(&self.key.service_name)
     }
 }
 

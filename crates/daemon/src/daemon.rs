@@ -178,7 +178,6 @@ impl FungiDaemon {
             service_discovery: service_discovery_control,
             service_control: service_control_protocol_control,
             tcp_tunneling: tcp_tunneling_control,
-            service_access: service_access_manager.clone(),
         });
         let devices = Devices::new(DevicesInit {
             local_device: device_info,

@@ -3,7 +3,7 @@ use std::{
     time::SystemTime,
 };
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use fungi_config::runtime::Runtime as RuntimeConfig;
 use libp2p::PeerId;
 
@@ -358,16 +358,18 @@ impl FungiControl {
         device_id: PeerId,
         name: &str,
     ) -> Result<ServiceControlResponse> {
-        if !self
+        let removed = self
             .devices()
             .peer(device_id)
             .services()
             .service(name)
-            .forget_cached_observation()
-            .await?
-        {
+            .forget_cached_observation()?;
+        if !removed {
             anyhow::bail!("cached service not found for device: {name}");
         }
+        self.service_access_manager()
+            .forget_service(device_id, name)
+            .await?;
         Ok(ServiceControlResponse::success_forgotten_locally(
             None,
             name.to_string(),
@@ -477,6 +479,14 @@ impl FungiControl {
     ) -> Result<ServiceControlResponse> {
         let service = self.devices().peer(peer_id).services().service(name);
         service.start().await?;
+        self.restore_saved_service_access(peer_id, service.name().to_string())
+            .await
+            .with_context(|| {
+                format!(
+                    "remote service started, but failed to restore saved local access listeners for {}",
+                    service.name()
+                )
+            })?;
         Ok(ServiceControlResponse::success(
             None,
             service.name().to_string(),
@@ -512,6 +522,14 @@ impl FungiControl {
     ) -> Result<ServiceControlResponse> {
         let service = self.devices().peer(peer_id).services().service(name);
         service.stop().await?;
+        self.service_access_manager()
+            .detach(peer_id, service.name())
+            .with_context(|| {
+                format!(
+                    "remote service stopped, but failed to disconnect local access listeners for {}",
+                    service.name()
+                )
+            })?;
         Ok(ServiceControlResponse::success(
             None,
             service.name().to_string(),
@@ -525,6 +543,15 @@ impl FungiControl {
     ) -> Result<ServiceControlResponse> {
         let service = self.devices().peer(peer_id).services().service(name);
         service.remove().await?;
+        self.service_access_manager()
+            .forget_service(peer_id, service.name())
+            .await
+            .with_context(|| {
+                format!(
+                    "remote service removed, but failed to forget local access records for {}",
+                    service.name()
+                )
+            })?;
         Ok(ServiceControlResponse::success(
             None,
             service.name().to_string(),
