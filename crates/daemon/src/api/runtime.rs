@@ -292,11 +292,11 @@ impl FungiControl {
     }
 
     pub fn save_device_service_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
-        self.devices().save_snapshot(snapshot)
+        self.services().save_snapshot(snapshot)
     }
 
     pub fn remove_device_service_snapshot(&self, device_id: PeerId) -> Result<bool> {
-        self.devices().peer(device_id).services().remove_snapshot()
+        self.services().remove_snapshot(device_id)
     }
 
     pub async fn get_device_service_snapshot(
@@ -560,7 +560,7 @@ fn runtime_status_warning(
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::devices::merge_device_service_snapshot;
+    use crate::services::merge_device_service_snapshot;
     use crate::test_support::TestDaemon;
     use crate::{
         DeviceServiceEndpoint, ServiceExposeUsage, ServiceExposeUsageKind, ServicePhase,

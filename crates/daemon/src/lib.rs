@@ -11,6 +11,7 @@ mod service_access_manager;
 mod service_control;
 mod service_endpoints;
 mod service_state;
+mod services;
 
 /// Utilities for spawning ephemeral [`FungiDaemon`] instances in tests.
 ///
@@ -23,7 +24,7 @@ use clap::Parser;
 pub use control::FungiControl;
 pub use controls::{DEFAULT_REMOTE_SERVICE_LOG_TAIL, MAX_REMOTE_SERVICE_LOG_TAIL};
 pub use daemon::FungiDaemon;
-pub use devices::{DeviceHandle, DeviceKind, DeviceServices, Devices, ServiceHandle};
+pub use devices::{DeviceHandle, DeviceKind, Devices};
 pub use node_capabilities::{
     LocalRuntimeAvailability, LocalRuntimeStatus, NodeCapabilities, NodeRuntimeCapabilities,
     build_local_node_capabilities, build_local_runtime_status,
@@ -44,6 +45,7 @@ pub use runtime::{
 pub use service_control::{
     ServiceControlError, ServiceControlRequest, ServiceControlResponse, ServiceControlServiceRef,
 };
+pub use services::{DeviceServices, ServiceHandle, Services};
 
 #[derive(Debug, Clone, Default, Parser)]
 pub struct DaemonArgs {

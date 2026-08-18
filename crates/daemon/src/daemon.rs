@@ -34,6 +34,7 @@ use tokio::task::JoinHandle;
 use crate::{
     devices::{Devices, DevicesInit},
     service_access_manager::ServiceAccessManager,
+    services::{Services, ServicesInit},
 };
 
 const DIRECT_ADDRESS_CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(30);
@@ -170,16 +171,20 @@ impl FungiDaemon {
 
         let service_access_manager =
             ServiceAccessManager::new(fungi_home.clone(), tcp_tunneling_control.clone());
-        let devices = Devices::new(DevicesInit {
-            local_device: device_info,
-            config: devices_config,
+        let services = Services::new(ServicesInit {
+            local_device_id: device_info.peer_id,
             fungi_dir: fungi_home,
-            swarm_state: state,
             runtime: runtime_control,
             service_discovery: service_discovery_control,
             service_control: service_control_protocol_control,
             tcp_tunneling: tcp_tunneling_control,
-            service_access: service_access_manager,
+            service_access: service_access_manager.clone(),
+        });
+        let devices = Devices::new(DevicesInit {
+            local_device: device_info,
+            config: devices_config,
+            swarm_state: state,
+            services: services.clone(),
         });
 
         let trusted_devices_config = Arc::new(Mutex::new(trusted_devices_config));
@@ -191,6 +196,8 @@ impl FungiDaemon {
         let control = FungiControl::new(FungiControlInit {
             config: shared_config,
             devices,
+            services,
+            service_access: service_access_manager,
             trusted_devices_config,
             swarm_control,
             mdns_control,

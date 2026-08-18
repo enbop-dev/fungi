@@ -1,23 +1,128 @@
-use std::{collections::BTreeMap, path::PathBuf, time::SystemTime};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
 
 use anyhow::{Context as _, Result, bail};
+use fungi_config::service_cache::DeviceServiceSnapshotCache;
 use libp2p::PeerId;
 
 use crate::{
     DeviceService, DeviceServiceSnapshot, ManifestResolutionPolicy, ServiceAccess, ServiceInstance,
     ServiceLogs, ServiceLogsOptions,
+    controls::{ServiceControlProtocolControl, ServiceDiscoveryControl, TcpTunnelingControl},
+    devices::DeviceHandle,
+    runtime::RuntimeControl,
+    service_access_manager::ServiceAccessManager,
     service_endpoints::{
         sync_service_endpoint_listeners_by_name, sync_service_endpoint_listeners_for_manifest,
     },
     service_state::DesiredServiceState,
 };
 
-use super::DeviceHandle;
+struct LocalServiceBackend {
+    runtime: RuntimeControl,
+    tcp_tunneling: TcpTunnelingControl,
+}
+
+struct RemoteServiceBackend {
+    discovery: ServiceDiscoveryControl,
+    control: ServiceControlProtocolControl,
+}
+
+struct ServicesInner {
+    local_device_id: PeerId,
+    fungi_dir: PathBuf,
+    local: LocalServiceBackend,
+    remote: RemoteServiceBackend,
+
+    // Transitional dependency. Service access becomes an independent FungiControl module in the
+    // next refactor step; keeping the handle here preserves current ServiceHandle behavior without
+    // leaving it in Devices.
+    service_access: ServiceAccessManager,
+}
+
+pub(crate) struct ServicesInit {
+    pub local_device_id: PeerId,
+    pub fungi_dir: PathBuf,
+    pub runtime: RuntimeControl,
+    pub service_discovery: ServiceDiscoveryControl,
+    pub service_control: ServiceControlProtocolControl,
+    pub tcp_tunneling: TcpTunnelingControl,
+    pub service_access: ServiceAccessManager,
+}
+
+/// Shared service domain for local and remote devices.
+#[derive(Clone)]
+pub struct Services {
+    inner: Arc<ServicesInner>,
+}
+
+impl Services {
+    pub(crate) fn new(init: ServicesInit) -> Self {
+        Self {
+            inner: Arc::new(ServicesInner {
+                local_device_id: init.local_device_id,
+                fungi_dir: init.fungi_dir,
+                local: LocalServiceBackend {
+                    runtime: init.runtime,
+                    tcp_tunneling: init.tcp_tunneling,
+                },
+                remote: RemoteServiceBackend {
+                    discovery: init.service_discovery,
+                    control: init.service_control,
+                },
+                service_access: init.service_access,
+            }),
+        }
+    }
+
+    pub(crate) fn for_device(&self, device: DeviceHandle) -> DeviceServices {
+        debug_assert_eq!(device.is_local(), device.id() == self.inner.local_device_id);
+        DeviceServices {
+            device,
+            services: self.clone(),
+        }
+    }
+
+    pub(crate) fn runtime(&self) -> &RuntimeControl {
+        &self.inner.local.runtime
+    }
+
+    pub(crate) fn service_discovery(&self) -> &ServiceDiscoveryControl {
+        &self.inner.remote.discovery
+    }
+
+    pub(crate) fn service_control(&self) -> &ServiceControlProtocolControl {
+        &self.inner.remote.control
+    }
+
+    pub(crate) fn tcp_tunneling(&self) -> &TcpTunnelingControl {
+        &self.inner.local.tcp_tunneling
+    }
+
+    pub(crate) fn save_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
+        let snapshot_json = serde_json::to_string(snapshot)?;
+        self.snapshot_cache()?
+            .set_device_snapshot_json(snapshot.peer_id.clone(), snapshot_json)?;
+        Ok(())
+    }
+
+    pub(crate) fn remove_snapshot(&self, peer_id: PeerId) -> Result<bool> {
+        if peer_id == self.inner.local_device_id {
+            return Ok(false);
+        }
+        self.snapshot_cache()?
+            .remove_device_snapshot(&peer_id.to_string())
+    }
+
+    fn snapshot_cache(&self) -> Result<DeviceServiceSnapshotCache> {
+        DeviceServiceSnapshotCache::apply_from_dir(&self.inner.fungi_dir)
+    }
+}
 
 /// Collection and observation boundary for one device's services.
 #[derive(Clone)]
 pub struct DeviceServices {
-    pub(super) device: DeviceHandle,
+    device: DeviceHandle,
+    services: Services,
 }
 
 impl DeviceServices {
@@ -33,9 +138,8 @@ impl DeviceServices {
             return Ok(None);
         }
 
-        let cache = self.device.devices.snapshot_cache()?;
-        let Some(snapshot_json) =
-            cache.get_device_snapshot_json(&self.device.peer_id.to_string())?
+        let cache = self.services.snapshot_cache()?;
+        let Some(snapshot_json) = cache.get_device_snapshot_json(&self.device.id().to_string())?
         else {
             return Ok(None);
         };
@@ -49,20 +153,20 @@ impl DeviceServices {
     /// Observes this device now. Remote successes replace the persisted shadow; local
     /// observations are returned directly without creating a redundant cache.
     pub async fn refresh(&self) -> Result<DeviceServiceSnapshot> {
-        let peer_id = self.device.peer_id;
+        let peer_id = self.device.id();
         let snapshot = if self.device.is_local() {
             let (managed, published) = tokio::try_join!(
-                self.device.devices.inner.runtime.list_services(),
-                self.device
-                    .devices
+                self.services.inner.local.runtime.list_services(),
+                self.services
                     .inner
+                    .local
                     .runtime
                     .list_published_device_services(),
             )?;
             merge_device_service_snapshot(peer_id, managed, published)
         } else {
-            let control = self.device.devices.inner.service_control.clone();
-            let discovery = self.device.devices.inner.service_discovery.clone();
+            let control = self.services.inner.remote.control.clone();
+            let discovery = self.services.inner.remote.discovery.clone();
             let (managed_response, published) = tokio::try_join!(
                 async move {
                     control.list_peer_services(peer_id).await.with_context(|| {
@@ -93,7 +197,7 @@ impl DeviceServices {
         };
 
         if !self.device.is_local() {
-            self.device.devices.save_snapshot(&snapshot)?;
+            self.services.save_snapshot(&snapshot)?;
         }
         Ok(snapshot)
     }
@@ -105,18 +209,18 @@ impl DeviceServices {
     /// Lists only endpoints published for connection, without the managed-service merge.
     pub async fn published(&self) -> Result<Vec<DeviceService>> {
         if self.device.is_local() {
-            self.device
-                .devices
+            self.services
                 .inner
+                .local
                 .runtime
                 .list_published_device_services()
                 .await
         } else {
-            self.device
-                .devices
+            self.services
                 .inner
-                .service_discovery
-                .list_peer_services(self.device.peer_id)
+                .remote
+                .discovery
+                .list_peer_services(self.device.id())
                 .await
         }
     }
@@ -124,6 +228,7 @@ impl DeviceServices {
     pub fn service(&self, name: impl Into<String>) -> ServiceHandle {
         ServiceHandle {
             device: self.device.clone(),
+            services: self.services.clone(),
             name: name.into(),
         }
     }
@@ -134,12 +239,12 @@ impl DeviceServices {
         manifest_base_dir: Option<PathBuf>,
     ) -> Result<ServiceHandle> {
         if self.device.is_local() {
-            let fungi_home = self.device.devices.inner.fungi_dir.clone();
+            let fungi_home = self.services.inner.fungi_dir.clone();
             let base_dir = manifest_base_dir.unwrap_or_else(|| fungi_home.clone());
             let applied = self
-                .device
-                .devices
+                .services
                 .inner
+                .local
                 .runtime
                 .apply_manifest_yaml(
                     &manifest_yaml,
@@ -150,14 +255,14 @@ impl DeviceServices {
                 .await?;
             if applied.desired_state == DesiredServiceState::Running {
                 sync_service_endpoint_listeners_for_manifest(
-                    &self.device.devices.inner.tcp_tunneling,
+                    &self.services.inner.local.tcp_tunneling,
                     applied.previous_manifest.as_ref(),
                     false,
                 )
                 .await?;
                 sync_service_endpoint_listeners_by_name(
-                    &self.device.devices.inner.runtime,
-                    &self.device.devices.inner.tcp_tunneling,
+                    &self.services.inner.local.runtime,
+                    &self.services.inner.local.tcp_tunneling,
                     &applied.instance.name,
                     true,
                 )
@@ -166,11 +271,11 @@ impl DeviceServices {
             Ok(self.service(applied.instance.name))
         } else {
             let response = self
-                .device
-                .devices
+                .services
                 .inner
-                .service_control
-                .pull_peer_service(self.device.peer_id, manifest_yaml)
+                .remote
+                .control
+                .pull_peer_service(self.device.id(), manifest_yaml)
                 .await?;
             self.refresh_or_keep_after_mutation().await;
             let service_name = response
@@ -184,17 +289,7 @@ impl DeviceServices {
     }
 
     pub(crate) fn save_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
-        self.device.devices.save_snapshot(snapshot)
-    }
-
-    pub(crate) fn remove_snapshot(&self) -> Result<bool> {
-        if self.device.is_local() {
-            return Ok(false);
-        }
-        self.device
-            .devices
-            .snapshot_cache()?
-            .remove_device_snapshot(&self.device.peer_id.to_string())
+        self.services.save_snapshot(snapshot)
     }
 
     pub(crate) fn remove_cached_service(&self, name: &str) -> Result<bool> {
@@ -214,7 +309,7 @@ impl DeviceServices {
         if let Err(error) = self.refresh().await {
             log::warn!(
                 "Failed to refresh device service snapshot for device {} after remote mutation: {error}",
-                self.device.peer_id
+                self.device.id()
             );
         }
     }
@@ -225,6 +320,7 @@ impl DeviceServices {
 #[derive(Clone)]
 pub struct ServiceHandle {
     device: DeviceHandle,
+    services: Services,
     name: String,
 }
 
@@ -237,31 +333,34 @@ impl ServiceHandle {
         &self.name
     }
 
+    fn device_services(&self) -> DeviceServices {
+        self.services.for_device(self.device.clone())
+    }
+
     pub fn observation(&self) -> Result<Option<DeviceService>> {
         Ok(self
-            .device
-            .services()
+            .device_services()
             .snapshot()?
             .and_then(|snapshot| find_service(snapshot, &self.name)))
     }
 
     pub async fn inspect(&self) -> Result<DeviceService> {
-        let snapshot = self.device.services().refresh().await?;
+        let snapshot = self.device_services().refresh().await?;
         find_service(snapshot, &self.name)
             .ok_or_else(|| anyhow::anyhow!("service not found: {}", self.name))
     }
 
     pub async fn start(&self) -> Result<()> {
         if self.device.is_local() {
-            self.device
-                .devices
+            self.services
                 .inner
+                .local
                 .runtime
                 .start_by_name(&self.name)
                 .await?;
             sync_service_endpoint_listeners_by_name(
-                &self.device.devices.inner.runtime,
-                &self.device.devices.inner.tcp_tunneling,
+                &self.services.inner.local.runtime,
+                &self.services.inner.local.tcp_tunneling,
                 &self.name,
                 true,
             )
@@ -270,11 +369,11 @@ impl ServiceHandle {
         }
 
         let response = self
-            .device
-            .devices
+            .services
             .inner
-            .service_control
-            .start_peer_service(self.device.peer_id, self.name.clone())
+            .remote
+            .control
+            .start_peer_service(self.device.id(), self.name.clone())
             .await?;
         let service_name = response
             .service
@@ -293,15 +392,15 @@ impl ServiceHandle {
 
     pub async fn stop(&self) -> Result<()> {
         if self.device.is_local() {
-            self.device
-                .devices
+            self.services
                 .inner
+                .local
                 .runtime
                 .stop_by_name(&self.name)
                 .await?;
             sync_service_endpoint_listeners_by_name(
-                &self.device.devices.inner.runtime,
-                &self.device.devices.inner.tcp_tunneling,
+                &self.services.inner.local.runtime,
+                &self.services.inner.local.tcp_tunneling,
                 &self.name,
                 false,
             )
@@ -310,29 +409,25 @@ impl ServiceHandle {
         }
 
         let response = self
-            .device
-            .devices
+            .services
             .inner
-            .service_control
-            .stop_peer_service(self.device.peer_id, self.name.clone())
+            .remote
+            .control
+            .stop_peer_service(self.device.id(), self.name.clone())
             .await?;
         let service_name = response
             .service
             .as_ref()
             .map(|service| service.name.as_str())
             .unwrap_or(self.name.as_str());
-        self.device
-            .devices
-            .inner
-            .service_access
-            .detach(self.device.peer_id, service_name)
+        self.services.inner.service_access
+            .detach(self.device.id(), service_name)
             .with_context(|| {
                 format!(
                     "remote service stopped, but failed to disconnect local access listeners for {service_name}"
                 )
             })?;
-        self.device
-            .services()
+        self.device_services()
             .refresh_or_keep_after_mutation()
             .await;
         Ok(())
@@ -341,19 +436,19 @@ impl ServiceHandle {
     pub async fn remove(&self) -> Result<()> {
         if self.device.is_local() {
             let manifest = self
-                .device
-                .devices
+                .services
                 .inner
+                .local
                 .runtime
                 .get_service_manifest(&self.name);
-            self.device
-                .devices
+            self.services
                 .inner
+                .local
                 .runtime
                 .remove_by_name(&self.name)
                 .await?;
             sync_service_endpoint_listeners_for_manifest(
-                &self.device.devices.inner.tcp_tunneling,
+                &self.services.inner.local.tcp_tunneling,
                 manifest.as_ref(),
                 false,
             )
@@ -362,30 +457,26 @@ impl ServiceHandle {
         }
 
         let response = self
-            .device
-            .devices
+            .services
             .inner
-            .service_control
-            .remove_peer_service(self.device.peer_id, self.name.clone())
+            .remote
+            .control
+            .remove_peer_service(self.device.id(), self.name.clone())
             .await?;
         let service_name = response
             .service
             .as_ref()
             .map(|service| service.name.as_str())
             .unwrap_or(self.name.as_str());
-        self.device
-            .devices
-            .inner
-            .service_access
-            .forget_service(self.device.peer_id, service_name)
+        self.services.inner.service_access
+            .forget_service(self.device.id(), service_name)
             .await
             .with_context(|| {
                 format!(
                     "remote service removed, but failed to forget local access records for {service_name}"
                 )
             })?;
-        self.device
-            .services()
+        self.device_services()
             .refresh_or_keep_after_mutation()
             .await;
         Ok(())
@@ -394,9 +485,9 @@ impl ServiceHandle {
     pub async fn logs(&self, tail: Option<usize>) -> Result<ServiceLogs> {
         if self.device.is_local() {
             return self
-                .device
-                .devices
+                .services
                 .inner
+                .local
                 .runtime
                 .logs_by_name(
                     &self.name,
@@ -411,11 +502,11 @@ impl ServiceHandle {
             .unwrap_or(crate::DEFAULT_REMOTE_SERVICE_LOG_TAIL)
             .clamp(1, crate::MAX_REMOTE_SERVICE_LOG_TAIL);
         let response = self
-            .device
-            .devices
+            .services
             .inner
-            .service_control
-            .get_peer_service_logs(self.device.peer_id, self.name.clone(), tail)
+            .remote
+            .control
+            .get_peer_service_logs(self.device.id(), self.name.clone(), tail)
             .await?;
         let text = response
             .logs_text
@@ -432,41 +523,38 @@ impl ServiceHandle {
         local_port: Option<u16>,
     ) -> Result<ServiceAccess> {
         self.ensure_remote_access()?;
-        let snapshot = self.device.services().refresh().await.map_err(|error| {
+        let snapshot = self.device_services().refresh().await.map_err(|error| {
             anyhow::anyhow!("failed to refresh remote service before attaching access: {error}")
         })?;
         let service = find_service(snapshot, &self.name)
             .ok_or_else(|| anyhow::anyhow!("remote service not found: {}", self.name))?;
-        self.device
-            .devices
+        self.services
             .inner
             .service_access
-            .attach(self.device.peer_id, service, entry, local_port)
+            .attach(self.device.id(), service, entry, local_port)
             .await
     }
 
     pub fn detach_access(&self) -> Result<()> {
         self.ensure_remote_access()?;
-        self.device
-            .devices
+        self.services
             .inner
             .service_access
-            .detach(self.device.peer_id, &self.name)
+            .detach(self.device.id(), &self.name)
     }
 
     pub async fn forget_access(&self) -> Result<()> {
         self.ensure_remote_access()?;
-        self.device
-            .devices
+        self.services
             .inner
             .service_access
-            .forget_service(self.device.peer_id, &self.name)
+            .forget_service(self.device.id(), &self.name)
             .await
     }
 
     pub async fn forget_cached_observation(&self) -> Result<bool> {
         self.ensure_remote_access()?;
-        let removed = self.device.services().remove_cached_service(&self.name)?;
+        let removed = self.device_services().remove_cached_service(&self.name)?;
         if removed {
             self.forget_access().await?;
         }
@@ -475,18 +563,17 @@ impl ServiceHandle {
 
     async fn restore_saved_access_after_start(&self, service_name: &str) -> Result<()> {
         let saved_entries = self
-            .device
-            .devices
+            .services
             .inner
             .service_access
-            .saved_entries(self.device.peer_id, service_name)
+            .saved_entries(self.device.id(), service_name)
             .await?;
-        let snapshot = self.device.services().refresh().await;
+        let snapshot = self.device_services().refresh().await;
         if saved_entries.is_empty() {
             if let Err(error) = snapshot {
                 log::warn!(
                     "Failed to refresh device service snapshot for device {} after remote mutation: {error}",
-                    self.device.peer_id
+                    self.device.id()
                 );
             }
             return Ok(());
@@ -495,11 +582,10 @@ impl ServiceHandle {
         let service = find_service(snapshot?, service_name)
             .ok_or_else(|| anyhow::anyhow!("remote service not found: {service_name}"))?;
         for entry in saved_entries {
-            self.device
-                .devices
+            self.services
                 .inner
                 .service_access
-                .attach(self.device.peer_id, service.clone(), Some(entry), None)
+                .attach(self.device.id(), service.clone(), Some(entry), None)
                 .await?;
         }
         Ok(())

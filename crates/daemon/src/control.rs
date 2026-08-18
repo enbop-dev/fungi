@@ -14,6 +14,7 @@ use crate::{
     devices::Devices,
     runtime::RuntimeControl,
     service_access_manager::{ServiceAccessManager, restore_saved_service_accesses},
+    services::Services,
 };
 
 /// Cloneable entry point for all daemon application APIs.
@@ -25,6 +26,8 @@ use crate::{
 pub struct FungiControl {
     config: Arc<Mutex<FungiConfig>>,
     devices: Devices,
+    services: Services,
+    service_access: ServiceAccessManager,
     trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
     swarm_control: SwarmControl,
     mdns_control: MdnsControl,
@@ -35,6 +38,8 @@ pub struct FungiControl {
 pub(crate) struct FungiControlInit {
     pub config: Arc<Mutex<FungiConfig>>,
     pub devices: Devices,
+    pub services: Services,
+    pub service_access: ServiceAccessManager,
     pub trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
     pub swarm_control: SwarmControl,
     pub mdns_control: MdnsControl,
@@ -47,6 +52,8 @@ impl FungiControl {
         Self {
             config: init.config,
             devices: init.devices,
+            services: init.services,
+            service_access: init.service_access,
             trusted_devices_config: init.trusted_devices_config,
             swarm_control: init.swarm_control,
             mdns_control: init.mdns_control,
@@ -61,6 +68,10 @@ impl FungiControl {
 
     pub fn devices(&self) -> &Devices {
         &self.devices
+    }
+
+    pub fn services(&self) -> &Services {
+        &self.services
     }
 
     pub fn devices_config(&self) -> Arc<Mutex<DevicesConfig>> {
@@ -80,19 +91,19 @@ impl FungiControl {
     }
 
     pub fn tcp_tunneling_control(&self) -> &TcpTunnelingControl {
-        self.devices.tcp_tunneling()
+        self.services.tcp_tunneling()
     }
 
     pub(crate) fn service_access_manager(&self) -> &ServiceAccessManager {
-        self.devices.service_access()
+        &self.service_access
     }
 
     pub fn runtime_control(&self) -> &RuntimeControl {
-        self.devices.runtime()
+        self.services.runtime()
     }
 
     pub fn service_discovery_control(&self) -> &ServiceDiscoveryControl {
-        self.devices.service_discovery()
+        self.services.service_discovery()
     }
 
     pub fn node_capabilities_control(&self) -> &NodeCapabilitiesControl {
@@ -100,7 +111,7 @@ impl FungiControl {
     }
 
     pub fn service_control_protocol_control(&self) -> &ServiceControlProtocolControl {
-        self.devices.service_control()
+        self.services.service_control()
     }
 
     pub fn mdns_control(&self) -> &MdnsControl {
@@ -111,7 +122,7 @@ impl FungiControl {
     ///
     /// The task owns only the two domain handles it needs, not the whole control facade.
     pub fn spawn_saved_service_access_restore(&self) -> JoinHandle<()> {
-        let service_access = self.devices.service_access().clone();
+        let service_access = self.service_access.clone();
         let devices = self.devices.clone();
         tokio::spawn(async move {
             log::info!("Restoring saved service access in the background...");

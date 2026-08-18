@@ -29,6 +29,7 @@ impl FungiControl {
 
     pub async fn devices_remove(&self, peer_id: PeerId) -> Result<()> {
         self.devices().remove(peer_id).await?;
+        self.service_access_manager().forget_device(peer_id).await?;
         // Preserve the current CLI behavior while authorization remains a separate daemon-level
         // domain. `Devices::remove` itself intentionally does not imply this policy decision.
         self.untrust_device(peer_id)?;

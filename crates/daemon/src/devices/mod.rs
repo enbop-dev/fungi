@@ -1,47 +1,25 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use fungi_config::{
-    devices::{DeviceInfo, DevicesConfig},
-    service_cache::DeviceServiceSnapshotCache,
-};
+use fungi_config::devices::{DeviceInfo, DevicesConfig};
 use fungi_swarm::{PeerAddressSource, State};
 use libp2p::{Multiaddr, PeerId};
 use parking_lot::Mutex;
 
-use crate::{
-    DeviceServiceSnapshot, RuntimeControl,
-    controls::{ServiceControlProtocolControl, ServiceDiscoveryControl, TcpTunnelingControl},
-    service_access_manager::ServiceAccessManager,
-};
-
-mod services;
-#[cfg(test)]
-pub(crate) use services::merge_device_service_snapshot;
-pub use services::{DeviceServices, ServiceHandle};
+use crate::{DeviceServices, Services};
 
 struct DevicesInner {
     local_device: DeviceInfo,
     config: Arc<Mutex<DevicesConfig>>,
-    fungi_dir: PathBuf,
     swarm_state: State,
-    runtime: RuntimeControl,
-    service_discovery: ServiceDiscoveryControl,
-    service_control: ServiceControlProtocolControl,
-    tcp_tunneling: TcpTunnelingControl,
-    service_access: ServiceAccessManager,
+    services: Services,
 }
 
 pub(crate) struct DevicesInit {
     pub local_device: DeviceInfo,
     pub config: DevicesConfig,
-    pub fungi_dir: PathBuf,
     pub swarm_state: State,
-    pub runtime: RuntimeControl,
-    pub service_discovery: ServiceDiscoveryControl,
-    pub service_control: ServiceControlProtocolControl,
-    pub tcp_tunneling: TcpTunnelingControl,
-    pub service_access: ServiceAccessManager,
+    pub services: Services,
 }
 
 /// Directory and shared capabilities for devices actively managed by this daemon.
@@ -59,13 +37,8 @@ impl Devices {
             inner: Arc::new(DevicesInner {
                 local_device: init.local_device,
                 config: Arc::new(Mutex::new(init.config)),
-                fungi_dir: init.fungi_dir,
                 swarm_state: init.swarm_state,
-                runtime: init.runtime,
-                service_discovery: init.service_discovery,
-                service_control: init.service_control,
-                tcp_tunneling: init.tcp_tunneling,
-                service_access: init.service_access,
+                services: init.services,
             }),
         }
     }
@@ -142,44 +115,12 @@ impl Devices {
             *config = updated;
         }
 
-        self.inner.service_access.forget_device(peer_id).await?;
-        let _ = self.peer(peer_id).services().remove_snapshot()?;
+        let _ = self.inner.services.remove_snapshot(peer_id)?;
         Ok(())
     }
 
     pub(crate) fn config(&self) -> Arc<Mutex<DevicesConfig>> {
         self.inner.config.clone()
-    }
-
-    pub(crate) fn service_discovery(&self) -> &ServiceDiscoveryControl {
-        &self.inner.service_discovery
-    }
-
-    pub(crate) fn service_control(&self) -> &ServiceControlProtocolControl {
-        &self.inner.service_control
-    }
-
-    pub(crate) fn runtime(&self) -> &RuntimeControl {
-        &self.inner.runtime
-    }
-
-    pub(crate) fn tcp_tunneling(&self) -> &TcpTunnelingControl {
-        &self.inner.tcp_tunneling
-    }
-
-    pub(crate) fn service_access(&self) -> &ServiceAccessManager {
-        &self.inner.service_access
-    }
-
-    pub(crate) fn save_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
-        let snapshot_json = serde_json::to_string(snapshot)?;
-        self.snapshot_cache()?
-            .set_device_snapshot_json(snapshot.peer_id.clone(), snapshot_json)?;
-        Ok(())
-    }
-
-    fn snapshot_cache(&self) -> Result<DeviceServiceSnapshotCache> {
-        DeviceServiceSnapshotCache::apply_from_dir(&self.inner.fungi_dir)
     }
 
     fn record_addresses(&self, device_info: &DeviceInfo) {
@@ -248,9 +189,7 @@ impl DeviceHandle {
     }
 
     pub fn services(&self) -> DeviceServices {
-        DeviceServices {
-            device: self.clone(),
-        }
+        self.devices.inner.services.for_device(self.clone())
     }
 }
 
