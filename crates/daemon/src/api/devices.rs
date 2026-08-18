@@ -37,10 +37,7 @@ impl FungiControl {
     }
 
     pub fn list_trusted_devices(&self) -> Vec<DeviceInfo> {
-        let trusted_device_ids = self
-            .swarm_control()
-            .state()
-            .get_incoming_allowed_peers_list();
+        let trusted_device_ids = self.inbound_access().authorized_peers();
         let devices_config_guard = self.devices_config();
         let devices_config = devices_config_guard.lock();
 

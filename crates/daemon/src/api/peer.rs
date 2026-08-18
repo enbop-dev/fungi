@@ -107,30 +107,12 @@ impl FungiControl {
     }
 
     pub fn trust_device(&self, peer_id: PeerId) -> Result<()> {
-        let current_config = self.trusted_devices().lock().clone();
-        let updated_config = current_config.add_trusted_device(&peer_id)?;
-        *self.trusted_devices().lock() = updated_config;
-
-        self.swarm_control()
-            .state()
-            .incoming_allowed_peers()
-            .write()
-            .insert(peer_id);
-        Ok(())
+        self.inbound_access().authorize(peer_id)
     }
 
     pub fn untrust_device(&self, peer_id: PeerId) -> Result<()> {
-        let current_config = self.trusted_devices().lock().clone();
-        let updated_config = current_config.remove_trusted_device(&peer_id)?;
-        *self.trusted_devices().lock() = updated_config;
-
-        self.swarm_control()
-            .state()
-            .incoming_allowed_peers()
-            .write()
-            .remove(&peer_id);
         // TODO disconnect connected incoming peer
-        Ok(())
+        self.inbound_access().revoke(peer_id)
     }
 
     pub fn get_peer_connections(&self, peer_id: PeerId) -> Option<Vec<ConnectionRecord>> {

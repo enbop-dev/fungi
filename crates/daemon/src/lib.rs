@@ -5,6 +5,7 @@ mod controls;
 mod daemon;
 mod devices;
 mod http_client;
+mod inbound_access;
 mod node_capabilities;
 mod recipes;
 pub mod runtime;
@@ -27,6 +28,7 @@ pub use control::FungiControl;
 pub use controls::{DEFAULT_REMOTE_SERVICE_LOG_TAIL, MAX_REMOTE_SERVICE_LOG_TAIL};
 pub use daemon::FungiDaemon;
 pub use devices::{DeviceHandle, DeviceKind, Devices};
+pub use inbound_access::InboundAccessPolicy;
 pub use node_capabilities::{
     LocalRuntimeAvailability, LocalRuntimeStatus, NodeCapabilities, NodeRuntimeCapabilities,
     build_local_node_capabilities, build_local_runtime_status,

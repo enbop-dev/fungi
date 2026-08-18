@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
-    Connectivity,
+    Connectivity, InboundAccessPolicy,
     controls::{
         DockerControl, NodeCapabilitiesControl, ServiceControlProtocolControl,
         ServiceDiscoveryControl, TcpTunnelingControl, mdns::MdnsControl,
@@ -29,7 +29,7 @@ pub struct FungiControl {
     devices: Devices,
     services: Services,
     service_access: ServiceAccessManager,
-    trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
+    inbound_access: InboundAccessPolicy,
     connectivity: Connectivity,
     docker_control: Option<DockerControl>,
     node_capabilities_control: NodeCapabilitiesControl,
@@ -40,7 +40,7 @@ pub(crate) struct FungiControlInit {
     pub devices: Devices,
     pub services: Services,
     pub service_access: ServiceAccessManager,
-    pub trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
+    pub inbound_access: InboundAccessPolicy,
     pub connectivity: Connectivity,
     pub docker_control: Option<DockerControl>,
     pub node_capabilities_control: NodeCapabilitiesControl,
@@ -53,7 +53,7 @@ impl FungiControl {
             devices: init.devices,
             services: init.services,
             service_access: init.service_access,
-            trusted_devices_config: init.trusted_devices_config,
+            inbound_access: init.inbound_access,
             connectivity: init.connectivity,
             docker_control: init.docker_control,
             node_capabilities_control: init.node_capabilities_control,
@@ -76,12 +76,16 @@ impl FungiControl {
         &self.connectivity
     }
 
+    pub fn inbound_access(&self) -> &InboundAccessPolicy {
+        &self.inbound_access
+    }
+
     pub fn devices_config(&self) -> Arc<Mutex<DevicesConfig>> {
         self.devices.config()
     }
 
     pub fn trusted_devices(&self) -> Arc<Mutex<TrustedDevicesConfig>> {
-        self.trusted_devices_config.clone()
+        self.inbound_access.trusted_peers_config()
     }
 
     pub fn swarm_control(&self) -> &SwarmControl {

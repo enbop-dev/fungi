@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    Connectivity, DaemonArgs,
+    Connectivity, DaemonArgs, InboundAccessPolicy,
     control::{FungiControl, FungiControlInit},
     controls::{
         DockerControl, NodeCapabilitiesControl, ServiceControlProtocolControl,
@@ -87,6 +87,8 @@ impl FungiDaemon {
                 .into_iter()
                 .collect(),
         );
+        let inbound_access =
+            InboundAccessPolicy::new(trusted_devices_config, state.incoming_allowed_peers());
         hydrate_device_addresses(&state, &devices_config);
         hydrate_direct_address_cache(&state, &direct_address_cache);
 
@@ -184,14 +186,13 @@ impl FungiDaemon {
             services: services.clone(),
         });
 
-        let trusted_devices_config = Arc::new(Mutex::new(trusted_devices_config));
         let direct_address_cache_sync_task = connectivity.spawn_direct_address_cache_sync();
         let control = FungiControl::new(FungiControlInit {
             config: shared_config,
             devices,
             services,
             service_access: service_access_manager,
-            trusted_devices_config,
+            inbound_access,
             connectivity,
             docker_control,
             node_capabilities_control,
