@@ -45,7 +45,7 @@ pub use runtime::{
 pub use service_control::{
     ServiceControlError, ServiceControlRequest, ServiceControlResponse, ServiceControlServiceRef,
 };
-pub use services::{DeviceServices, ServiceHandle, Services};
+pub use services::{DeviceServices, ServiceHandle, ServiceKey, Services};
 
 #[derive(Debug, Clone, Default, Parser)]
 pub struct DaemonArgs {

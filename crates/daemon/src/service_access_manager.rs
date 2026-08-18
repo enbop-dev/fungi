@@ -19,7 +19,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     DeviceService, DeviceServiceEndpoint, DeviceServiceSnapshot, ServiceAccess,
-    ServiceAccessEndpoint, controls::TcpTunnelingControl, devices::Devices,
+    ServiceAccessEndpoint, Services, controls::TcpTunnelingControl,
 };
 
 const STARTUP_SERVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -332,7 +332,7 @@ impl ServiceAccessManager {
         Ok(self.local_preferences()?.records)
     }
 
-    async fn restore_from_cached_snapshots(&self, devices: &Devices) {
+    async fn restore_from_cached_snapshots(&self, services: &Services) {
         let records = match self.preference_records().await {
             Ok(records) => records,
             Err(error) => {
@@ -341,14 +341,14 @@ impl ServiceAccessManager {
             }
         };
 
-        self.restore_records_from_cached_snapshots(&records, devices)
+        self.restore_records_from_cached_snapshots(&records, services)
             .await;
     }
 
     pub(crate) async fn restore_records_from_cached_snapshots(
         &self,
         records: &[LocalServicePreference],
-        devices: &Devices,
+        services: &Services,
     ) {
         for candidate in records {
             let peer_id = match candidate.remote_peer_id.parse::<PeerId>() {
@@ -361,7 +361,7 @@ impl ServiceAccessManager {
                     continue;
                 }
             };
-            let snapshot = match devices.peer(peer_id).services().snapshot() {
+            let snapshot = match services.for_device(peer_id).snapshot() {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) => {
                     log::debug!(
@@ -586,9 +586,11 @@ impl ServiceAccessManager {
 
 pub(crate) async fn restore_saved_service_accesses(
     service_access: ServiceAccessManager,
-    devices: Devices,
+    services: Services,
 ) {
-    service_access.restore_from_cached_snapshots(&devices).await;
+    service_access
+        .restore_from_cached_snapshots(&services)
+        .await;
 
     let records = match service_access.preference_records().await {
         Ok(records) => records,
@@ -614,8 +616,8 @@ pub(crate) async fn restore_saved_service_accesses(
         .collect::<BTreeSet<_>>();
 
     for (peer_id, result) in refresh_devices(peer_ids, |peer_id| {
-        let services = devices.peer(peer_id).services();
-        async move { services.refresh().await }
+        let device_services = services.for_device(peer_id);
+        async move { device_services.refresh().await }
     })
     .await
     {
@@ -626,7 +628,9 @@ pub(crate) async fn restore_saved_service_accesses(
         }
     }
 
-    service_access.restore_from_cached_snapshots(&devices).await;
+    service_access
+        .restore_from_cached_snapshots(&services)
+        .await;
 }
 
 async fn refresh_devices<F, Fut>(

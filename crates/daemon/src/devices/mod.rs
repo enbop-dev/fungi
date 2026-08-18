@@ -189,7 +189,7 @@ impl DeviceHandle {
     }
 
     pub fn services(&self) -> DeviceServices {
-        self.devices.inner.services.for_device(self.clone())
+        self.devices.inner.services.for_device(self.peer_id)
     }
 }
 

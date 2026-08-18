@@ -38,7 +38,7 @@ impl FungiControl {
     pub async fn restore_saved_service_access_from_snapshots(&self) {
         restore_saved_service_accesses(
             self.service_access_manager().clone(),
-            self.devices().clone(),
+            self.services().clone(),
         )
         .await;
     }
@@ -207,7 +207,7 @@ mod tests {
         client
             .daemon()
             .service_access_manager()
-            .restore_records_from_cached_snapshots(&stale_records, client.daemon().devices())
+            .restore_records_from_cached_snapshots(&stale_records, client.daemon().services())
             .await;
 
         assert!(
@@ -265,7 +265,7 @@ mod tests {
         client
             .daemon()
             .service_access_manager()
-            .restore_records_from_cached_snapshots(&stale_records, client.daemon().devices())
+            .restore_records_from_cached_snapshots(&stale_records, client.daemon().services())
             .await;
 
         let active_ports = client
@@ -308,7 +308,7 @@ mod tests {
         client
             .daemon()
             .service_access_manager()
-            .restore_records_from_cached_snapshots(&stale_records, client.daemon().devices())
+            .restore_records_from_cached_snapshots(&stale_records, client.daemon().services())
             .await;
 
         assert!(

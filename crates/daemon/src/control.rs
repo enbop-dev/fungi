@@ -123,10 +123,10 @@ impl FungiControl {
     /// The task owns only the two domain handles it needs, not the whole control facade.
     pub fn spawn_saved_service_access_restore(&self) -> JoinHandle<()> {
         let service_access = self.service_access.clone();
-        let devices = self.devices.clone();
+        let services = self.services.clone();
         tokio::spawn(async move {
             log::info!("Restoring saved service access in the background...");
-            restore_saved_service_accesses(service_access, devices).await;
+            restore_saved_service_accesses(service_access, services).await;
             log::info!("Finished restoring saved service access");
         })
     }
