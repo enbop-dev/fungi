@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     path::PathBuf,
     sync::Arc,
@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result};
 use fungi_config::runtime::Runtime as RuntimeConfig;
 use fungi_config::service_cache::DeviceServiceSnapshotCache;
 use libp2p::PeerId;
+use parking_lot::Mutex;
 
 use crate::{
     DeviceService, DeviceServiceSnapshot, ManifestResolutionPolicy, ServiceInstance, ServiceLogs,
@@ -37,9 +38,76 @@ struct RemoteServiceBackend {
     control: ServiceControlProtocolControl,
 }
 
+struct DeviceServiceSnapshots {
+    fungi_dir: PathBuf,
+    epochs: Mutex<HashMap<PeerId, u64>>,
+}
+
+impl DeviceServiceSnapshots {
+    fn new(fungi_dir: PathBuf) -> Self {
+        Self {
+            fungi_dir,
+            epochs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, peer_id: PeerId) -> Result<Option<DeviceServiceSnapshot>> {
+        let Some(snapshot_json) = self
+            .cache()?
+            .get_device_snapshot_json(&peer_id.to_string())?
+        else {
+            return Ok(None);
+        };
+        serde_json::from_str(&snapshot_json)
+            .map(Some)
+            .map_err(|error| {
+                anyhow::anyhow!("failed to decode cached device service snapshot: {error}")
+            })
+    }
+
+    fn epoch(&self, peer_id: PeerId) -> u64 {
+        self.epochs
+            .lock()
+            .get(&peer_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn save_if_current(
+        &self,
+        peer_id: PeerId,
+        expected_epoch: u64,
+        snapshot: &DeviceServiceSnapshot,
+    ) -> Result<bool> {
+        let epochs = self.epochs.lock();
+        if epochs.get(&peer_id).copied().unwrap_or_default() != expected_epoch {
+            return Ok(false);
+        }
+
+        let snapshot_json = serde_json::to_string(snapshot)?;
+        self.cache()?
+            .set_device_snapshot_json(snapshot.peer_id.clone(), snapshot_json)?;
+        Ok(true)
+    }
+
+    fn remove(&self, peer_id: PeerId) -> Result<bool> {
+        let mut epochs = self.epochs.lock();
+        let epoch = epochs.entry(peer_id).or_default();
+        *epoch = epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("device service snapshot epoch overflow"))?;
+        self.cache()?.remove_device_snapshot(&peer_id.to_string())
+    }
+
+    fn cache(&self) -> Result<DeviceServiceSnapshotCache> {
+        DeviceServiceSnapshotCache::apply_from_dir(&self.fungi_dir)
+    }
+}
+
 struct ServicesInner {
     local_device_id: PeerId,
     fungi_dir: PathBuf,
+    snapshots: DeviceServiceSnapshots,
     local: LocalServiceBackend,
     remote: RemoteServiceBackend,
 }
@@ -62,10 +130,12 @@ pub struct Services {
 
 impl Services {
     pub(crate) fn new(init: ServicesInit) -> Self {
+        let snapshots = DeviceServiceSnapshots::new(init.fungi_dir.clone());
         Self {
             inner: Arc::new(ServicesInner {
                 local_device_id: init.local_device_id,
                 fungi_dir: init.fungi_dir,
+                snapshots,
                 local: LocalServiceBackend {
                     runtime: init.runtime,
                     docker: init.docker,
@@ -110,23 +180,11 @@ impl Services {
         &self.inner.local.tcp_tunneling
     }
 
-    pub(crate) fn save_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
-        let snapshot_json = serde_json::to_string(snapshot)?;
-        self.snapshot_cache()?
-            .set_device_snapshot_json(snapshot.peer_id.clone(), snapshot_json)?;
-        Ok(())
-    }
-
     pub(crate) fn remove_snapshot(&self, peer_id: PeerId) -> Result<bool> {
         if peer_id == self.inner.local_device_id {
             return Ok(false);
         }
-        self.snapshot_cache()?
-            .remove_device_snapshot(&peer_id.to_string())
-    }
-
-    fn snapshot_cache(&self) -> Result<DeviceServiceSnapshotCache> {
-        DeviceServiceSnapshotCache::apply_from_dir(&self.inner.fungi_dir)
+        self.inner.snapshots.remove(peer_id)
     }
 }
 
@@ -169,22 +227,15 @@ impl DeviceServices {
             return Ok(None);
         }
 
-        let cache = self.services.snapshot_cache()?;
-        let Some(snapshot_json) = cache.get_device_snapshot_json(&self.device_id.to_string())?
-        else {
-            return Ok(None);
-        };
-        serde_json::from_str(&snapshot_json)
-            .map(Some)
-            .map_err(|error| {
-                anyhow::anyhow!("failed to decode cached device service snapshot: {error}")
-            })
+        self.services.inner.snapshots.get(self.device_id)
     }
 
     /// Observes this device now. Remote successes replace the persisted shadow; local
     /// observations are returned directly without creating a redundant cache.
     pub async fn refresh(&self) -> Result<DeviceServiceSnapshot> {
         let peer_id = self.device_id;
+        let snapshot_epoch =
+            (!self.is_local()).then(|| self.services.inner.snapshots.epoch(peer_id));
         let snapshot = if self.is_local() {
             let (managed, published) = tokio::try_join!(
                 self.services.inner.local.runtime.list_services(),
@@ -230,8 +281,11 @@ impl DeviceServices {
             merge_device_service_snapshot(peer_id, managed, published)
         };
 
-        if !self.is_local() {
-            self.services.save_snapshot(&snapshot)?;
+        if let Some(snapshot_epoch) = snapshot_epoch {
+            self.services
+                .inner
+                .snapshots
+                .save_if_current(peer_id, snapshot_epoch, &snapshot)?;
         }
         Ok(snapshot)
     }
@@ -321,11 +375,8 @@ impl DeviceServices {
         }
     }
 
-    pub(crate) fn save_snapshot(&self, snapshot: &DeviceServiceSnapshot) -> Result<()> {
-        self.services.save_snapshot(snapshot)
-    }
-
     pub(crate) fn remove_cached_service(&self, name: &str) -> Result<bool> {
+        let snapshot_epoch = self.services.inner.snapshots.epoch(self.device_id);
         let Some(mut snapshot) = self.snapshot()? else {
             return Ok(false);
         };
@@ -334,7 +385,10 @@ impl DeviceServices {
         if snapshot.services.len() == before {
             return Ok(false);
         }
-        self.save_snapshot(&snapshot)?;
+        self.services
+            .inner
+            .snapshots
+            .save_if_current(self.device_id, snapshot_epoch, &snapshot)?;
         Ok(true)
     }
 
@@ -594,5 +648,40 @@ mod tests {
                 .to_string()
                 .contains("timed out after 15 seconds")
         );
+    }
+
+    #[test]
+    fn snapshot_removal_rejects_only_writes_started_before_removal() {
+        let fungi_dir = tempfile::tempdir().unwrap();
+        let snapshots = DeviceServiceSnapshots::new(fungi_dir.path().to_path_buf());
+        let peer_id = PeerId::random();
+        let snapshot = DeviceServiceSnapshot {
+            peer_id: peer_id.to_string(),
+            services: Vec::new(),
+            updated_at: SystemTime::now(),
+        };
+        let stale_epoch = snapshots.epoch(peer_id);
+
+        assert!(
+            snapshots
+                .save_if_current(peer_id, stale_epoch, &snapshot)
+                .unwrap()
+        );
+        assert!(snapshots.remove(peer_id).unwrap());
+
+        assert!(
+            !snapshots
+                .save_if_current(peer_id, stale_epoch, &snapshot)
+                .unwrap()
+        );
+        assert!(snapshots.get(peer_id).unwrap().is_none());
+
+        let current_epoch = snapshots.epoch(peer_id);
+        assert!(
+            snapshots
+                .save_if_current(peer_id, current_epoch, &snapshot)
+                .unwrap()
+        );
+        assert!(snapshots.get(peer_id).unwrap().is_some());
     }
 }

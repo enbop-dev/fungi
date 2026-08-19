@@ -35,8 +35,8 @@ use crate::{
 
 pub struct FungiDaemon {
     control: FungiControl,
-    swarm_task: JoinHandle<()>,
-    direct_address_cache_sync_task: JoinHandle<()>,
+    swarm_task: Option<JoinHandle<()>>,
+    direct_address_cache_sync_task: Option<JoinHandle<()>>,
 }
 
 impl FungiDaemon {
@@ -199,30 +199,52 @@ impl FungiDaemon {
 
         Ok(Self {
             control,
-            swarm_task,
-            direct_address_cache_sync_task,
+            swarm_task: Some(swarm_task),
+            direct_address_cache_sync_task: Some(direct_address_cache_sync_task),
         })
     }
 
     pub async fn wait(&mut self) -> Result<()> {
-        match (&mut self.swarm_task).await {
+        let result = await_task_once(&mut self.swarm_task)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("swarm task has already been joined"))?;
+        match result {
             Ok(()) => bail!("swarm task stopped unexpectedly"),
             Err(error) => Err(anyhow::anyhow!("swarm task failed: {error}")),
         }
     }
 
     pub async fn shutdown(mut self) {
-        self.swarm_task.abort();
-        self.direct_address_cache_sync_task.abort();
-        let _ = (&mut self.swarm_task).await;
-        let _ = (&mut self.direct_address_cache_sync_task).await;
+        abort_and_join_task(&mut self.swarm_task).await;
+        abort_and_join_task(&mut self.direct_address_cache_sync_task).await;
     }
 }
 
 impl Drop for FungiDaemon {
     fn drop(&mut self) {
-        self.swarm_task.abort();
-        self.direct_address_cache_sync_task.abort();
+        abort_task(&self.swarm_task);
+        abort_task(&self.direct_address_cache_sync_task);
+    }
+}
+
+async fn await_task_once(
+    task: &mut Option<JoinHandle<()>>,
+) -> Option<std::result::Result<(), tokio::task::JoinError>> {
+    let result = task.as_mut()?.await;
+    task.take();
+    Some(result)
+}
+
+async fn abort_and_join_task(task: &mut Option<JoinHandle<()>>) {
+    if let Some(task) = task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+fn abort_task(task: &Option<JoinHandle<()>>) {
+    if let Some(task) = task {
+        task.abort();
     }
 }
 
@@ -473,4 +495,33 @@ fn apply_listen(swarm: &mut TSwarm, config: &FungiConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_task_is_removed_after_its_result_is_joined() {
+        let mut task = Some(tokio::spawn(async {}));
+
+        let result = await_task_once(&mut task).await.unwrap();
+
+        assert!(result.is_ok());
+        assert!(task.is_none());
+        abort_and_join_task(&mut task).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_task_wait_preserves_daemon_ownership() {
+        let mut task = Some(tokio::spawn(std::future::pending::<()>()));
+        let mut wait = Box::pin(await_task_once(&mut task));
+
+        assert!(futures::poll!(&mut wait).is_pending());
+        drop(wait);
+
+        assert!(task.is_some());
+        abort_and_join_task(&mut task).await;
+        assert!(task.is_none());
+    }
 }
