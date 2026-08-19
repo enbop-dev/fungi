@@ -33,6 +33,10 @@ use crate::{
     services::{Services, ServicesInit},
 };
 
+/// Owns the lifecycle of one running daemon instance.
+///
+/// Shared application APIs live in [`FungiControl`]; this non-cloneable root retains the unique
+/// background tasks and aborts them when dropped.
 pub struct FungiDaemon {
     control: FungiControl,
     swarm_task: Option<JoinHandle<()>>,
@@ -227,6 +231,8 @@ impl Drop for FungiDaemon {
     }
 }
 
+/// Keeps the handle in its owner while pending, then removes it after consuming the result.
+/// This remains cancellation-safe inside `tokio::select!` and prevents a second join.
 async fn await_task_once(
     task: &mut Option<JoinHandle<()>>,
 ) -> Option<std::result::Result<(), tokio::task::JoinError>> {

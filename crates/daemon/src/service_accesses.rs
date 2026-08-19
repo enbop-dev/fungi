@@ -37,6 +37,9 @@ struct ServiceAccessesInner {
 }
 
 /// Owns local service-access preferences and their active forwarding listeners.
+///
+/// Persisted preferences express user intent; listeners are a runtime projection that can be
+/// restored from cached service metadata without making startup depend on remote availability.
 #[derive(Clone)]
 pub struct ServiceAccesses {
     inner: Arc<ServiceAccessesInner>,

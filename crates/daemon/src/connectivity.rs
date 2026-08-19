@@ -21,6 +21,8 @@ struct ConnectivityInner {
 }
 
 /// Shared connectivity capabilities backed by the daemon's single libp2p swarm.
+///
+/// Domain handles share this boundary instead of carrying independent low-level network controls.
 #[derive(Clone)]
 pub struct Connectivity {
     inner: Arc<ConnectivityInner>,

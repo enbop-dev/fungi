@@ -38,6 +38,10 @@ struct RemoteServiceBackend {
     control: ServiceControlProtocolControl,
 }
 
+/// Stores best-effort remote observations independently from device-directory membership.
+///
+/// Per-peer epochs let removal invalidate an older in-flight write without holding a lock during
+/// remote I/O. A later refresh may still create a new observation for an addressable peer.
 struct DeviceServiceSnapshots {
     fungi_dir: PathBuf,
     epochs: Mutex<HashMap<PeerId, u64>>,
@@ -123,6 +127,9 @@ pub(crate) struct ServicesInit {
 }
 
 /// Shared service domain for local and remote devices.
+///
+/// The same handles route local operations to runtime backends and remote operations to libp2p
+/// protocols. Remote status is a cached observation rather than authoritative state.
 #[derive(Clone)]
 pub struct Services {
     inner: Arc<ServicesInner>,
