@@ -2,14 +2,14 @@ use anyhow::Result;
 use fungi_swarm::{ConnectionDirection, ConnectionRecord};
 use libp2p::{Multiaddr, PeerId, StreamProtocol, multiaddr::Protocol};
 
-use crate::FungiDaemon;
+use crate::FungiControl;
 
 use super::types::{
     ActiveStreamSnapshot, ConnectionSnapshot, ExternalAddressSnapshot, PeerAddressSnapshot,
     ProtocolStreamCountSnapshot, RelayEndpointStatusSnapshot,
 };
 
-impl FungiDaemon {
+impl FungiControl {
     fn build_connection_snapshot(
         &self,
         peer_id: PeerId,
@@ -24,6 +24,7 @@ impl FungiDaemon {
             };
 
         let active_streams_by_protocol = self
+            .connectivity()
             .swarm_control()
             .state()
             .connection_active_stream_protocol_counts(&conn.connection_id())
@@ -76,7 +77,8 @@ impl FungiDaemon {
     }
 
     fn is_configured_relay_peer(&self, peer_id: PeerId) -> bool {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_relay_endpoint_statuses()
             .into_iter()
@@ -84,7 +86,7 @@ impl FungiDaemon {
     }
 
     pub fn host_name(&self) -> Option<String> {
-        self.config().lock().get_hostname()
+        self.settings().hostname()
     }
 
     #[cfg(target_os = "android")]
@@ -95,46 +97,31 @@ impl FungiDaemon {
     }
 
     pub fn peer_id(&self) -> String {
-        self.swarm_control().local_peer_id().to_string()
+        self.connectivity()
+            .swarm_control()
+            .local_peer_id()
+            .to_string()
     }
 
     pub fn config_file_path(&self) -> String {
-        self.config()
-            .lock()
+        self.settings()
             .config_file_path()
             .to_string_lossy()
             .to_string()
     }
 
     pub fn trust_device(&self, peer_id: PeerId) -> Result<()> {
-        let current_config = self.trusted_devices().lock().clone();
-        let updated_config = current_config.add_trusted_device(&peer_id)?;
-        *self.trusted_devices().lock() = updated_config;
-
-        self.swarm_control()
-            .state()
-            .incoming_allowed_peers()
-            .write()
-            .insert(peer_id);
-        Ok(())
+        self.inbound_access().authorize(peer_id)
     }
 
     pub fn untrust_device(&self, peer_id: PeerId) -> Result<()> {
-        let current_config = self.trusted_devices().lock().clone();
-        let updated_config = current_config.remove_trusted_device(&peer_id)?;
-        *self.trusted_devices().lock() = updated_config;
-
-        self.swarm_control()
-            .state()
-            .incoming_allowed_peers()
-            .write()
-            .remove(&peer_id);
         // TODO disconnect connected incoming peer
-        Ok(())
+        self.inbound_access().revoke(peer_id)
     }
 
     pub fn get_peer_connections(&self, peer_id: PeerId) -> Option<Vec<ConnectionRecord>> {
         let connections = self
+            .connectivity()
             .swarm_control()
             .state()
             .get_connections_by_peer_id(&peer_id);
@@ -146,7 +133,8 @@ impl FungiDaemon {
     }
 
     pub fn list_external_address_candidates(&self) -> Vec<ExternalAddressSnapshot> {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_external_address_candidates()
             .into_iter()
@@ -155,7 +143,8 @@ impl FungiDaemon {
     }
 
     pub fn list_relay_endpoint_statuses(&self) -> Vec<RelayEndpointStatusSnapshot> {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_relay_endpoint_statuses()
             .into_iter()
@@ -164,7 +153,8 @@ impl FungiDaemon {
     }
 
     pub fn list_peer_addresses(&self) -> Vec<PeerAddressSnapshot> {
-        self.swarm_control()
+        self.connectivity()
+            .swarm_control()
             .state()
             .list_peer_addresses()
             .into_iter()
@@ -173,7 +163,7 @@ impl FungiDaemon {
     }
 
     pub fn list_connections(&self, peer_id: Option<PeerId>) -> Vec<ConnectionSnapshot> {
-        let state = self.swarm_control().state();
+        let state = self.connectivity().swarm_control().state();
 
         let mut snapshots = Vec::new();
         for pid in state.connected_peer_ids() {
@@ -200,6 +190,7 @@ impl FungiDaemon {
 
     pub fn list_active_streams(&self) -> Vec<ActiveStreamSnapshot> {
         let mut streams = self
+            .connectivity()
             .swarm_control()
             .state()
             .list_active_streams()
@@ -222,6 +213,7 @@ impl FungiDaemon {
         protocol: StreamProtocol,
     ) -> Vec<ActiveStreamSnapshot> {
         let mut streams = self
+            .connectivity()
             .swarm_control()
             .state()
             .active_streams_by_protocol(&protocol)

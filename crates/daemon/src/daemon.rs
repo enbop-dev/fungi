@@ -1,14 +1,14 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     env,
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
-    sync::Arc,
     time::Duration,
 };
 
 use crate::{
-    DaemonArgs,
+    Connectivity, DaemonArgs, InboundAccessPolicy, Settings,
+    control::{FungiControl, FungiControlInit},
     controls::{
         DockerControl, NodeCapabilitiesControl, ServiceControlProtocolControl,
         ServiceDiscoveryControl, TcpTunnelingControl, mdns::MdnsControl,
@@ -22,90 +22,34 @@ use fungi_config::{
     direct_addresses::DirectAddressCache,
     trusted_devices::TrustedDevicesConfig,
 };
-use fungi_swarm::{
-    ConnectionDirection, FungiSwarm, PeerAddressSource, State, SwarmControl, TSwarm,
-};
+use fungi_swarm::{FungiSwarm, PeerAddressSource, State, TSwarm};
 use fungi_util::keypair::get_keypair_from_dir;
 use libp2p::{Multiaddr, identity::Keypair, multiaddr::Protocol};
-use parking_lot::Mutex;
-use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
+use tokio::task::JoinHandle;
 
-const DIRECT_ADDRESS_CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(30);
+use crate::{
+    devices::{Devices, DevicesInit},
+    service_accesses::ServiceAccesses,
+    services::{Services, ServicesInit},
+};
 
-#[allow(dead_code)]
-struct TaskHandles {
-    swarm_task: JoinHandle<()>,
-    direct_address_cache_sync_task: JoinHandle<()>,
-}
-
-#[allow(dead_code)]
+/// Owns the lifecycle of one running daemon instance.
+///
+/// Shared application APIs live in [`FungiControl`]; this non-cloneable root retains the unique
+/// background tasks and aborts them when dropped.
 pub struct FungiDaemon {
-    config: Arc<Mutex<FungiConfig>>,
-    devices_config: Arc<Mutex<DevicesConfig>>,
-    trusted_devices_config: Arc<Mutex<TrustedDevicesConfig>>,
-    direct_address_cache: Arc<Mutex<DirectAddressCache>>,
-    local_preferences_lock: Arc<AsyncMutex<()>>,
-    args: DaemonArgs,
-
-    swarm_control: SwarmControl,
-    mdns_control: MdnsControl,
-    docker_control: Option<DockerControl>,
-    tcp_tunneling_control: TcpTunnelingControl,
-    runtime_control: RuntimeControl,
-    service_discovery_control: ServiceDiscoveryControl,
-    node_capabilities_control: NodeCapabilitiesControl,
-    service_control_protocol_control: ServiceControlProtocolControl,
-
-    task_handles: TaskHandles,
+    control: FungiControl,
+    swarm_task: Option<JoinHandle<()>>,
+    direct_address_cache_sync_task: Option<JoinHandle<()>>,
 }
 
 impl FungiDaemon {
-    pub fn config(&self) -> Arc<Mutex<FungiConfig>> {
-        self.config.clone()
+    pub fn control(&self) -> FungiControl {
+        self.control.clone()
     }
 
-    pub fn devices(&self) -> Arc<Mutex<DevicesConfig>> {
-        self.devices_config.clone()
-    }
-
-    pub fn trusted_devices(&self) -> Arc<Mutex<TrustedDevicesConfig>> {
-        self.trusted_devices_config.clone()
-    }
-
-    pub(crate) fn local_preferences_lock(&self) -> Arc<AsyncMutex<()>> {
-        self.local_preferences_lock.clone()
-    }
-
-    pub fn swarm_control(&self) -> &SwarmControl {
-        &self.swarm_control
-    }
-
-    pub fn docker_control(&self) -> Option<&DockerControl> {
-        self.docker_control.as_ref()
-    }
-
-    pub fn tcp_tunneling_control(&self) -> &TcpTunnelingControl {
-        &self.tcp_tunneling_control
-    }
-
-    pub fn runtime_control(&self) -> &RuntimeControl {
-        &self.runtime_control
-    }
-
-    pub fn service_discovery_control(&self) -> &ServiceDiscoveryControl {
-        &self.service_discovery_control
-    }
-
-    pub fn node_capabilities_control(&self) -> &NodeCapabilitiesControl {
-        &self.node_capabilities_control
-    }
-
-    pub fn service_control_protocol_control(&self) -> &ServiceControlProtocolControl {
-        &self.service_control_protocol_control
-    }
-
-    pub fn mdns_control(&self) -> &MdnsControl {
-        &self.mdns_control
+    pub(crate) fn control_ref(&self) -> &FungiControl {
+        &self.control
     }
 
     pub async fn start(fungi_dir: PathBuf, args: DaemonArgs) -> Result<Self> {
@@ -130,7 +74,7 @@ impl FungiDaemon {
     }
 
     pub async fn start_with(
-        args: DaemonArgs,
+        _args: DaemonArgs,
         config: FungiConfig,
         keypair: Keypair,
         devices_config: DevicesConfig,
@@ -144,6 +88,8 @@ impl FungiDaemon {
                 .into_iter()
                 .collect(),
         );
+        let inbound_access =
+            InboundAccessPolicy::new(trusted_devices_config, state.incoming_allowed_peers());
         hydrate_device_addresses(&state, &devices_config);
         hydrate_direct_address_cache(&state, &direct_address_cache);
 
@@ -177,7 +123,9 @@ impl FungiDaemon {
         let mdns_control = MdnsControl::new();
         // TODO duplicate with libp2p-mdns?
         let device_info = mdns_device_info(&config, swarm_control.local_peer_id());
-        mdns_control.start(device_info, state.clone())?;
+        mdns_control.start(device_info.clone(), state.clone())?;
+        let connectivity =
+            Connectivity::new(swarm_control.clone(), mdns_control, direct_address_cache);
 
         let fungi_home = config
             .config_file_path()
@@ -185,7 +133,7 @@ impl FungiDaemon {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let docker_control = DockerControl::from_config(&config.runtime, &fungi_home)?;
-        let shared_config = Arc::new(Mutex::new(config.clone()));
+        let settings = Settings::new(config.clone());
         let runtime_root = config
             .config_file_path()
             .parent()
@@ -207,7 +155,7 @@ impl FungiDaemon {
         service_discovery_control.start()?;
         let node_capabilities_control = NodeCapabilitiesControl::new(
             swarm_control.clone(),
-            shared_config.clone(),
+            settings.config_handle(),
             runtime_control.clone(),
         );
         node_capabilities_control.start()?;
@@ -216,135 +164,135 @@ impl FungiDaemon {
 
         let service_control_protocol_control = ServiceControlProtocolControl::new(
             swarm_control.clone(),
-            fungi_home,
+            fungi_home.clone(),
             runtime_control.clone(),
             tcp_tunneling_control.clone(),
         );
         service_control_protocol_control.start()?;
 
-        let devices_config = Arc::new(Mutex::new(devices_config));
-        let trusted_devices_config = Arc::new(Mutex::new(trusted_devices_config));
-        let direct_address_cache = Arc::new(Mutex::new(direct_address_cache));
-        let local_preferences_lock = Arc::new(AsyncMutex::new(()));
+        let service_access =
+            ServiceAccesses::new(fungi_home.clone(), tcp_tunneling_control.clone());
+        let services = Services::new(ServicesInit {
+            local_device_id: device_info.peer_id,
+            fungi_dir: fungi_home,
+            runtime: runtime_control,
+            docker: docker_control,
+            service_discovery: service_discovery_control,
+            service_control: service_control_protocol_control,
+            tcp_tunneling: tcp_tunneling_control,
+        });
+        let devices = Devices::new(DevicesInit {
+            local_device: device_info,
+            config: devices_config,
+            connectivity: connectivity.clone(),
+            services: services.clone(),
+            node_capabilities: node_capabilities_control,
+        });
 
-        let task_handles = TaskHandles {
-            swarm_task,
-            direct_address_cache_sync_task: spawn_direct_address_cache_sync_task(
-                swarm_control.clone(),
-                direct_address_cache.clone(),
-            ),
-        };
-        let daemon = Self {
-            config: shared_config,
-            devices_config,
-            trusted_devices_config,
-            direct_address_cache,
-            local_preferences_lock,
-            args,
-            swarm_control,
-            mdns_control,
-            docker_control,
-            tcp_tunneling_control,
-            runtime_control,
-            service_discovery_control,
-            node_capabilities_control,
-            service_control_protocol_control,
-            task_handles,
-        };
+        let direct_address_cache_sync_task = connectivity.spawn_direct_address_cache_sync();
+        let control = FungiControl::new(FungiControlInit {
+            settings,
+            devices,
+            services,
+            service_access,
+            inbound_access,
+            connectivity,
+        });
 
-        daemon.restore_service_endpoint_listeners().await?;
-        daemon.restore_saved_service_access_from_snapshots().await;
+        restore_local_service_endpoint_listeners(&control).await?;
 
-        Ok(daemon)
+        Ok(Self {
+            control,
+            swarm_task: Some(swarm_task),
+            direct_address_cache_sync_task: Some(direct_address_cache_sync_task),
+        })
     }
 
-    pub async fn wait_all(self) {
-        tokio::select! {
-            _ = self.task_handles.swarm_task => {
-                println!("Swarm task is closed");
-            },
-            // _ = self.task_handles.daemon_rpc_task => {
-            //     println!("Daemon RPC task is closed");
-            // },
+    pub async fn wait(&mut self) -> Result<()> {
+        let result = await_task_once(&mut self.swarm_task)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("swarm task has already been joined"))?;
+        match result {
+            Ok(()) => bail!("swarm task stopped unexpectedly"),
+            Err(error) => Err(anyhow::anyhow!("swarm task failed: {error}")),
         }
     }
 
-    async fn restore_service_endpoint_listeners(&self) -> Result<()> {
-        let mut listening_rules = self.tcp_tunneling_control.get_listening_rules();
-        let mut restored_protocols = std::collections::BTreeSet::new();
-
-        for service in self.runtime_control.list_services().await? {
-            if !service.status.is_running() {
-                continue;
-            }
-
-            for endpoint in service.exposed_endpoints {
-                restore_service_endpoint_listener(
-                    &self.tcp_tunneling_control,
-                    &mut listening_rules,
-                    &mut restored_protocols,
-                    endpoint.host_port,
-                    endpoint.protocol,
-                )
-                .await;
-            }
-        }
-
-        for manifest in self.runtime_control.desired_running_service_manifests() {
-            for endpoint in crate::runtime::service_expose_endpoint_bindings(&manifest) {
-                restore_service_endpoint_listener(
-                    &self.tcp_tunneling_control,
-                    &mut listening_rules,
-                    &mut restored_protocols,
-                    endpoint.host_port,
-                    endpoint.protocol,
-                )
-                .await;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn add_service_access_forwarding_rule_internal(
-        &self,
-        rule: fungi_config::tcp_tunneling::ForwardingRule,
-    ) -> Result<String> {
-        ensure_service_access_forwarding_rule(&rule)?;
-        self.tcp_tunneling_control.add_forwarding_rule(rule).await
-    }
-
-    pub(crate) fn remove_service_access_forwarding_rule_internal(
-        &self,
-        rule_id: &str,
-    ) -> Result<()> {
-        self.tcp_tunneling_control.remove_forwarding_rule(rule_id)
-    }
-
-    pub fn config_fungi_dir(&self) -> Result<PathBuf> {
-        self.config
-            .lock()
-            .config_file_path()
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| anyhow::anyhow!("config file has no parent directory"))
+    pub async fn shutdown(mut self) {
+        abort_and_join_task(&mut self.swarm_task).await;
+        abort_and_join_task(&mut self.direct_address_cache_sync_task).await;
     }
 }
 
-fn ensure_service_access_forwarding_rule(
-    rule: &fungi_config::tcp_tunneling::ForwardingRule,
-) -> Result<()> {
-    if rule
-        .remote_service_name
-        .as_deref()
-        .is_none_or(str::is_empty)
-        || rule
-            .remote_service_port_name
-            .as_deref()
-            .is_none_or(str::is_empty)
-    {
-        anyhow::bail!("service access forwarding rules require remote service metadata");
+impl Drop for FungiDaemon {
+    fn drop(&mut self) {
+        abort_task(&self.swarm_task);
+        abort_task(&self.direct_address_cache_sync_task);
     }
+}
+
+/// Keeps the handle in its owner while pending, then removes it after consuming the result.
+/// This remains cancellation-safe inside `tokio::select!` and prevents a second join.
+async fn await_task_once(
+    task: &mut Option<JoinHandle<()>>,
+) -> Option<std::result::Result<(), tokio::task::JoinError>> {
+    let result = task.as_mut()?.await;
+    task.take();
+    Some(result)
+}
+
+async fn abort_and_join_task(task: &mut Option<JoinHandle<()>>) {
+    if let Some(task) = task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+fn abort_task(task: &Option<JoinHandle<()>>) {
+    if let Some(task) = task {
+        task.abort();
+    }
+}
+
+/// Restores listeners for services running on this device. This path performs no remote refresh.
+async fn restore_local_service_endpoint_listeners(control: &FungiControl) -> Result<()> {
+    let mut listening_rules = control.services().tcp_tunneling().get_listening_rules();
+    let mut restored_protocols = std::collections::BTreeSet::new();
+
+    for service in control.services().runtime().list_services().await? {
+        if !service.status.is_running() {
+            continue;
+        }
+
+        for endpoint in service.exposed_endpoints {
+            restore_service_endpoint_listener(
+                control.services().tcp_tunneling(),
+                &mut listening_rules,
+                &mut restored_protocols,
+                endpoint.host_port,
+                endpoint.protocol,
+            )
+            .await;
+        }
+    }
+
+    for manifest in control
+        .services()
+        .runtime()
+        .desired_running_service_manifests()
+    {
+        for endpoint in crate::runtime::service_expose_endpoint_bindings(&manifest) {
+            restore_service_endpoint_listener(
+                control.services().tcp_tunneling(),
+                &mut listening_rules,
+                &mut restored_protocols,
+                endpoint.host_port,
+                endpoint.protocol,
+            )
+            .await;
+        }
+    }
+
     Ok(())
 }
 
@@ -459,109 +407,6 @@ fn mdns_device_info(config: &FungiConfig, peer_id: libp2p::PeerId) -> DeviceInfo
     device_info
 }
 
-fn spawn_direct_address_cache_sync_task(
-    swarm_control: SwarmControl,
-    direct_address_cache: Arc<Mutex<DirectAddressCache>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(DIRECT_ADDRESS_CACHE_SYNC_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_synced_pairs = BTreeSet::<(String, String)>::new();
-
-        loop {
-            interval.tick().await;
-
-            let grouped = collect_direct_connection_addresses(swarm_control.state());
-            let grouped = new_direct_address_successes(grouped, &mut last_synced_pairs);
-            if grouped.is_empty() {
-                continue;
-            }
-
-            let mut current = direct_address_cache.lock().clone();
-            let mut updated_any = false;
-            for (peer_id, addresses) in grouped {
-                match current.record_successful_addresses(peer_id, addresses) {
-                    Ok(updated) => {
-                        current = updated;
-                        updated_any = true;
-                    }
-                    Err(error) => {
-                        log::warn!("Failed to save cached direct address: {error}");
-                    }
-                }
-            }
-
-            if updated_any {
-                *direct_address_cache.lock() = current;
-            }
-        }
-    })
-}
-
-fn collect_direct_connection_addresses(state: &State) -> BTreeMap<String, Vec<String>> {
-    let mut grouped = BTreeMap::<String, Vec<String>>::new();
-    for peer_id in state.connected_peer_ids() {
-        for connection in state.get_connections_by_peer_id(&peer_id) {
-            if !matches!(connection.direction, ConnectionDirection::Outbound)
-                || connection.is_relay()
-            {
-                continue;
-            }
-
-            grouped
-                .entry(peer_id.to_string())
-                .or_default()
-                .push(connection.remote_addr.to_string());
-        }
-    }
-
-    normalize_direct_address_groups(grouped)
-}
-
-fn new_direct_address_successes(
-    grouped: BTreeMap<String, Vec<String>>,
-    last_synced_pairs: &mut BTreeSet<(String, String)>,
-) -> BTreeMap<String, Vec<String>> {
-    let current_pairs = direct_address_pairs(&grouped);
-    let mut new_pairs = BTreeMap::<String, Vec<String>>::new();
-
-    for (peer_id, address) in current_pairs.difference(last_synced_pairs) {
-        new_pairs
-            .entry(peer_id.clone())
-            .or_default()
-            .push(address.clone());
-    }
-
-    *last_synced_pairs = current_pairs;
-    new_pairs
-}
-
-fn direct_address_pairs(grouped: &BTreeMap<String, Vec<String>>) -> BTreeSet<(String, String)> {
-    grouped
-        .iter()
-        .flat_map(|(peer_id, addresses)| {
-            addresses
-                .iter()
-                .map(|address| (peer_id.clone(), address.clone()))
-        })
-        .collect()
-}
-
-fn normalize_direct_address_groups(
-    mut grouped: BTreeMap<String, Vec<String>>,
-) -> BTreeMap<String, Vec<String>> {
-    grouped.retain(|_, addresses| {
-        addresses.retain(|address| !address.trim().is_empty());
-        for address in addresses.iter_mut() {
-            *address = address.trim().to_string();
-        }
-        addresses.sort();
-        addresses.dedup();
-        !addresses.is_empty()
-    });
-    grouped
-}
-
 async fn restore_service_endpoint_listener(
     tcp_tunneling_control: &TcpTunnelingControl,
     listening_rules: &mut Vec<(String, fungi_config::tcp_tunneling::ListeningRule)>,
@@ -662,83 +507,27 @@ fn apply_listen(swarm: &mut TSwarm, config: &FungiConfig) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn new_direct_address_successes_only_returns_new_pairs() {
-        let mut last_synced_pairs = BTreeSet::new();
+    #[tokio::test]
+    async fn completed_task_is_removed_after_its_result_is_joined() {
+        let mut task = Some(tokio::spawn(async {}));
 
-        let first = new_direct_address_successes(
-            BTreeMap::from([
-                (
-                    "peer-a".to_string(),
-                    vec!["/ip4/192.168.1.7/tcp/4001".to_string()],
-                ),
-                (
-                    "peer-b".to_string(),
-                    vec!["/ip4/192.168.1.8/tcp/4001".to_string()],
-                ),
-            ]),
-            &mut last_synced_pairs,
-        );
-        assert_eq!(first.len(), 2);
+        let result = await_task_once(&mut task).await.unwrap();
 
-        let second = new_direct_address_successes(
-            BTreeMap::from([
-                (
-                    "peer-a".to_string(),
-                    vec!["/ip4/192.168.1.7/tcp/4001".to_string()],
-                ),
-                (
-                    "peer-b".to_string(),
-                    vec![
-                        "/ip4/192.168.1.8/tcp/4001".to_string(),
-                        "/ip4/192.168.1.9/tcp/4001".to_string(),
-                    ],
-                ),
-            ]),
-            &mut last_synced_pairs,
-        );
-        assert_eq!(
-            second,
-            BTreeMap::from([(
-                "peer-b".to_string(),
-                vec!["/ip4/192.168.1.9/tcp/4001".to_string()]
-            )])
-        );
+        assert!(result.is_ok());
+        assert!(task.is_none());
+        abort_and_join_task(&mut task).await;
+    }
 
-        let third = new_direct_address_successes(
-            BTreeMap::from([
-                (
-                    "peer-a".to_string(),
-                    vec!["/ip4/192.168.1.7/tcp/4001".to_string()],
-                ),
-                (
-                    "peer-b".to_string(),
-                    vec![
-                        "/ip4/192.168.1.8/tcp/4001".to_string(),
-                        "/ip4/192.168.1.9/tcp/4001".to_string(),
-                    ],
-                ),
-            ]),
-            &mut last_synced_pairs,
-        );
-        assert!(third.is_empty());
+    #[tokio::test]
+    async fn cancelling_task_wait_preserves_daemon_ownership() {
+        let mut task = Some(tokio::spawn(std::future::pending::<()>()));
+        let mut wait = Box::pin(await_task_once(&mut task));
 
-        let empty = new_direct_address_successes(BTreeMap::new(), &mut last_synced_pairs);
-        assert!(empty.is_empty());
+        assert!(futures::poll!(&mut wait).is_pending());
+        drop(wait);
 
-        let after_disconnect = new_direct_address_successes(
-            BTreeMap::from([(
-                "peer-a".to_string(),
-                vec!["/ip4/192.168.1.7/tcp/4001".to_string()],
-            )]),
-            &mut last_synced_pairs,
-        );
-        assert_eq!(
-            after_disconnect,
-            BTreeMap::from([(
-                "peer-a".to_string(),
-                vec!["/ip4/192.168.1.7/tcp/4001".to_string()]
-            )])
-        );
+        assert!(task.is_some());
+        abort_and_join_task(&mut task).await;
+        assert!(task.is_none());
     }
 }

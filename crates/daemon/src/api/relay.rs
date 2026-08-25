@@ -2,53 +2,38 @@ use anyhow::Result;
 use fungi_config::EffectiveRelayAddress;
 use libp2p::Multiaddr;
 
-use crate::FungiDaemon;
+use crate::FungiControl;
 
-impl FungiDaemon {
+impl FungiControl {
     pub fn relay_enabled(&self) -> bool {
-        self.config().lock().network.relay_enabled
+        self.settings().relay_enabled()
     }
 
     pub fn use_community_relays(&self) -> bool {
-        self.config().lock().network.use_community_relays
+        self.settings().use_community_relays()
     }
 
     pub fn custom_relay_addresses(&self) -> Vec<Multiaddr> {
-        self.config().lock().network.custom_relay_addresses.clone()
+        self.settings().custom_relay_addresses()
     }
 
     pub fn effective_relay_addresses(&self) -> Vec<EffectiveRelayAddress> {
-        self.config()
-            .lock()
-            .network
-            .effective_relay_addresses(&fungi_swarm::get_default_relay_addrs())
+        self.settings().effective_relay_addresses()
     }
 
     pub fn set_relay_enabled(&self, enabled: bool) -> Result<()> {
-        let current_config = self.config().lock().clone();
-        let updated_config = current_config.set_relay_enabled(enabled)?;
-        *self.config().lock() = updated_config;
-        Ok(())
+        self.settings().set_relay_enabled(enabled)
     }
 
     pub fn set_use_community_relays(&self, enabled: bool) -> Result<()> {
-        let current_config = self.config().lock().clone();
-        let updated_config = current_config.set_use_community_relays(enabled)?;
-        *self.config().lock() = updated_config;
-        Ok(())
+        self.settings().set_use_community_relays(enabled)
     }
 
     pub fn add_custom_relay_address(&self, address: Multiaddr) -> Result<()> {
-        let current_config = self.config().lock().clone();
-        let updated_config = current_config.add_custom_relay_address(address)?;
-        *self.config().lock() = updated_config;
-        Ok(())
+        self.settings().add_custom_relay_address(address)
     }
 
     pub fn remove_custom_relay_address(&self, address: Multiaddr) -> Result<()> {
-        let current_config = self.config().lock().clone();
-        let updated_config = current_config.remove_custom_relay_address(&address)?;
-        *self.config().lock() = updated_config;
-        Ok(())
+        self.settings().remove_custom_relay_address(&address)
     }
 }

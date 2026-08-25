@@ -22,6 +22,7 @@ use fungi_daemon_grpc::{
         ServiceNameRequest,
     },
 };
+use futures::future::join_all;
 use serde::Serialize;
 
 use crate::commands::CommonArgs;
@@ -1325,24 +1326,18 @@ async fn print_service_overview(client: &mut RpcClient, verbose: bool, refresh: 
     );
 
     let devices = list_saved_devices(client).await;
-    if refresh {
-        for device in devices {
-            let saved_accesses = list_accesses(client, &device.peer_id).await;
-            let snapshot = fetch_device_service_snapshot(client, &device.peer_id, true).await;
-            add_remote_service_overview_rows(
-                &mut rows,
-                &device,
-                &saved_accesses,
-                snapshot,
-                verbose,
-            );
+    let device_rows = join_all(devices.into_iter().map(|device| {
+        let mut client = client.clone();
+        async move {
+            let saved_accesses = list_accesses(&mut client, &device.peer_id).await;
+            let snapshot =
+                fetch_device_service_snapshot(&mut client, &device.peer_id, refresh).await;
+            (device, saved_accesses, snapshot)
         }
-    } else {
-        for device in devices {
-            let accesses = list_accesses(client, &device.peer_id).await;
-            let snapshot = fetch_device_service_snapshot(client, &device.peer_id, false).await;
-            add_remote_service_overview_rows(&mut rows, &device, &accesses, snapshot, verbose);
-        }
+    }))
+    .await;
+    for (device, saved_accesses, snapshot) in device_rows {
+        add_remote_service_overview_rows(&mut rows, &device, &saved_accesses, snapshot, verbose);
     }
 
     rows.sort_by(|left, right| left.reference.cmp(&right.reference));

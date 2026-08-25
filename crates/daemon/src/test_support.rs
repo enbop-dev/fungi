@@ -51,7 +51,7 @@ use fungi_config::{
 use libp2p::{Multiaddr, PeerId, identity::Keypair, multiaddr::Protocol};
 use tempfile::TempDir;
 
-use crate::{DaemonArgs, FungiDaemon};
+use crate::{DaemonArgs, FungiControl, FungiDaemon};
 
 type ConfigMutator = Box<dyn Fn(&mut FungiConfig) + Send + Sync + 'static>;
 
@@ -159,7 +159,7 @@ impl TestDaemonBuilder {
             DaemonArgs::default(),
             cfg,
             keypair,
-            DevicesConfig::default(),
+            DevicesConfig::apply_from_dir(dir.path())?,
             trusted_devices,
             DirectAddressCache::apply_from_dir(dir.path())?,
         )
@@ -207,7 +207,11 @@ impl TestDaemon {
 
     /// The [`PeerId`] of this daemon.
     pub fn peer_id(&self) -> PeerId {
-        self.inner.swarm_control().local_peer_id()
+        self.inner
+            .control_ref()
+            .connectivity()
+            .swarm_control()
+            .local_peer_id()
     }
 
     /// A `Multiaddr` that can be dialled by another daemon on the same host.
@@ -221,9 +225,12 @@ impl TestDaemon {
             .with(Protocol::P2p(peer_id))
     }
 
-    /// Borrow the inner daemon for calling any daemon API directly.
-    pub fn daemon(&self) -> &FungiDaemon {
-        &self.inner
+    /// Borrow the daemon's application API.
+    ///
+    /// The method name remains `daemon()` so existing test scenarios stay readable while the
+    /// production API separates daemon lifecycle ownership from the cloneable control facade.
+    pub fn daemon(&self) -> &FungiControl {
+        self.inner.control_ref()
     }
 
     /// Return the isolated Fungi home used by this daemon.
@@ -233,7 +240,7 @@ impl TestDaemon {
 
     /// Borrow the underlying [`fungi_swarm::SwarmControl`].
     pub fn swarm_control(&self) -> &fungi_swarm::SwarmControl {
-        self.inner.swarm_control()
+        self.inner.control_ref().connectivity().swarm_control()
     }
 
     // ── Connection helpers ────────────────────────────────────────────────
@@ -368,11 +375,10 @@ mod tests {
         assert_ne!(client.peer_id(), server.peer_id());
 
         // Server's trusted devices should include the client.
-        let trusted_devices = server.daemon().trusted_devices();
-        let client_in_list = trusted_devices
-            .lock()
-            .trusted_devices
-            .contains(&client.peer_id());
+        let client_in_list = server
+            .daemon()
+            .inbound_access()
+            .is_authorized(client.peer_id());
         assert!(client_in_list, "server should trust client device");
     }
 
@@ -386,7 +392,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(d.daemon().config().lock().network.relay_enabled);
+        assert!(d.daemon().settings().snapshot().network.relay_enabled);
     }
 
     #[tokio::test]
@@ -401,8 +407,7 @@ mod tests {
             .await
             .unwrap();
 
-        let config_handle = d.daemon().config();
-        let config = config_handle.lock();
+        let config = d.daemon().settings().snapshot();
         assert!(config.network.relay_enabled);
         assert!(!config.network.use_community_relays);
         assert_eq!(config.network.custom_relay_addresses, vec![relay_addr]);
@@ -430,10 +435,8 @@ mod tests {
         assert!(
             !victim
                 .daemon()
-                .trusted_devices()
-                .lock()
-                .trusted_devices
-                .contains(&attacker_peer_id),
+                .inbound_access()
+                .is_authorized(attacker_peer_id),
             "victim must not trust attacker device"
         );
 
