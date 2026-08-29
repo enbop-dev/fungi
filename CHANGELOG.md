@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - 2026-08-29
+
+### Added
+
+- Trusted devices can read bounded remote service logs with `fungi service logs <service>@<device> [--tail N]`. Remote requests default to 200 lines, accept up to 2,000 lines, and cap responses at 512 KiB ([#65](https://github.com/enbop/fungi/pull/65)).
+- `fungi ping` now supports explicit `--count` and `--watch` modes and finishes after four rounds by default ([#69](https://github.com/enbop/fungi/pull/69)).
+
+### Changed
+
+- Saved remote service access is restored after the local RPC endpoint becomes ready, so unavailable devices no longer delay daemon startup ([#74](https://github.com/enbop/fungi/pull/74)).
+- Startup restoration and `fungi service list --refresh` now share one per-device refresh path, refresh devices concurrently, and use a 15-second timeout per device while retaining cached observations after refresh failures ([#74](https://github.com/enbop/fungi/pull/74)).
+- Recipe output now shows catalog release information once with clearer labels ([#68](https://github.com/enbop/fungi/pull/68)).
+- Daemon lifecycle ownership is separated from the cloneable control facade and its domain handles. Existing gRPC messages and persisted configuration formats remain compatible ([#74](https://github.com/enbop/fungi/pull/74)).
+
+### Fixed
+
+- New remote service access now requires a successful live refresh, preventing stale cached metadata from opening or returning unusable local endpoints when a device is offline or does not trust the current device ([#64](https://github.com/enbop/fungi/pull/64)).
+- CLI-to-daemon RPC requests now have bounded timeouts, and ping stream failures are reported instead of being treated as successful completion ([#69](https://github.com/enbop/fungi/pull/69)).
+
 ## [0.7.0] - 2026-07-12
 
 ### Added
