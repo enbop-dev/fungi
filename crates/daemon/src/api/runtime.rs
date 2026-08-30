@@ -8,8 +8,8 @@ use fungi_config::runtime::Runtime as RuntimeConfig;
 use libp2p::PeerId;
 
 use crate::runtime::{
-    DeviceService, DeviceServiceSnapshot, RuntimeKind, ServiceInstance, ServiceLogs,
-    ServiceLogsOptions, ServiceManifest,
+    AppliedService, DeviceService, DeviceServiceSnapshot, RuntimeKind, ServiceInstance,
+    ServiceLogs, ServiceLogsOptions, ServiceManifest,
 };
 use crate::service_endpoints::{
     sync_service_endpoint_listeners_by_name, sync_service_endpoint_listeners_for_manifest,
@@ -115,9 +115,21 @@ impl FungiControl {
                 applied.previous_manifest.as_ref(),
                 false,
             )
-            .await?;
+            .await
+            .with_context(|| {
+                format!(
+                    "service manifest applied, but failed to update endpoint listeners; final phase: {}",
+                    applied.outcome.final_status.phase
+                )
+            })?;
             self.sync_service_endpoint_listeners_by_name(&applied.instance.name, true)
-                .await?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "service manifest applied, but failed to publish endpoint listeners; final phase: {}",
+                        applied.outcome.final_status.phase
+                    )
+                })?;
         }
         Ok(applied.instance)
     }
@@ -127,6 +139,17 @@ impl FungiControl {
         manifest_yaml: String,
         manifest_base_dir: Option<PathBuf>,
     ) -> Result<ServiceInstance> {
+        Ok(self
+            .apply_service_from_manifest_yaml(manifest_yaml, manifest_base_dir)
+            .await?
+            .instance)
+    }
+
+    pub async fn apply_service_from_manifest_yaml(
+        &self,
+        manifest_yaml: String,
+        manifest_base_dir: Option<PathBuf>,
+    ) -> Result<AppliedService> {
         let fungi_home = self.fungi_home_dir();
         let base_dir = manifest_base_dir.unwrap_or_else(|| fungi_home.clone());
         let policy = self.manifest_resolution_policy();
@@ -140,11 +163,23 @@ impl FungiControl {
                 applied.previous_manifest.as_ref(),
                 false,
             )
-            .await?;
+            .await
+            .with_context(|| {
+                format!(
+                    "service manifest applied, but failed to update endpoint listeners; final phase: {}",
+                    applied.outcome.final_status.phase
+                )
+            })?;
             self.sync_service_endpoint_listeners_by_name(&applied.instance.name, true)
-                .await?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "service manifest applied, but failed to publish endpoint listeners; final phase: {}",
+                        applied.outcome.final_status.phase
+                    )
+                })?;
         }
-        Ok(applied.instance)
+        Ok(applied)
     }
 
     pub async fn start_service(&self, runtime: RuntimeKind, name: String) -> Result<()> {
@@ -433,16 +468,17 @@ impl FungiControl {
         peer_id: PeerId,
         manifest_yaml: String,
     ) -> Result<ServiceControlResponse> {
-        let service = self
+        let applied = self
             .devices()
             .peer(peer_id)
             .services()
-            .apply_manifest_yaml(manifest_yaml, None)
+            .apply_manifest_yaml_with_outcome(manifest_yaml, None)
             .await?;
-        Ok(ServiceControlResponse::success(
-            None,
-            service.name().to_string(),
-        ))
+        let service_name = applied.service.name().to_string();
+        Ok(match applied.outcome {
+            Some(outcome) => ServiceControlResponse::success_applied(None, service_name, outcome),
+            None => ServiceControlResponse::success(None, service_name),
+        })
     }
 
     pub async fn remote_start_service(

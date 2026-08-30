@@ -41,6 +41,7 @@ pub struct AppliedService {
     pub instance: ServiceInstance,
     pub previous_manifest: Option<ServiceManifest>,
     pub desired_state: DesiredServiceState,
+    pub outcome: ServiceApplyOutcome,
 }
 
 impl RuntimeControl {
@@ -142,6 +143,11 @@ impl RuntimeControl {
             .or(in_memory_runtime);
         let replacing_existing =
             previous_service.is_some() || previous_manifest.is_some() || previous_runtime.is_some();
+        let manifest_change = match previous_manifest.as_ref() {
+            None => ServiceManifestChange::Created,
+            Some(previous) if previous == manifest => ServiceManifestChange::Unchanged,
+            Some(_) => ServiceManifestChange::Changed,
+        };
 
         if let Some(previous_manifest) = previous_manifest.as_ref() {
             ensure_definition_id_compatible(previous_manifest, manifest)?;
@@ -213,6 +219,17 @@ impl RuntimeControl {
         }
 
         Ok(AppliedService {
+            outcome: ServiceApplyOutcome {
+                manifest_change,
+                workload_action: if desired_state == DesiredServiceState::Running
+                    && manifest.runtime != RuntimeKind::External
+                {
+                    ServiceWorkloadAction::Restarted
+                } else {
+                    ServiceWorkloadAction::None
+                },
+                final_status: instance.status.clone(),
+            },
             instance,
             previous_manifest,
             desired_state,

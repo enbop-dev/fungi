@@ -13,8 +13,8 @@ use libp2p::PeerId;
 use parking_lot::Mutex;
 
 use crate::{
-    DeviceService, DeviceServiceSnapshot, ManifestResolutionPolicy, ServiceInstance, ServiceLogs,
-    ServiceLogsOptions,
+    DeviceService, DeviceServiceSnapshot, ManifestResolutionPolicy, ServiceApplyOutcome,
+    ServiceInstance, ServiceLogs, ServiceLogsOptions,
     controls::{
         DockerControl, ServiceControlProtocolControl, ServiceDiscoveryControl, TcpTunnelingControl,
     },
@@ -217,6 +217,11 @@ pub struct DeviceServices {
     services: Services,
 }
 
+pub(crate) struct AppliedServiceHandle {
+    pub service: ServiceHandle,
+    pub outcome: Option<ServiceApplyOutcome>,
+}
+
 impl DeviceServices {
     pub fn device_id(&self) -> PeerId {
         self.device_id
@@ -332,6 +337,17 @@ impl DeviceServices {
         manifest_yaml: String,
         manifest_base_dir: Option<PathBuf>,
     ) -> Result<ServiceHandle> {
+        Ok(self
+            .apply_manifest_yaml_with_outcome(manifest_yaml, manifest_base_dir)
+            .await?
+            .service)
+    }
+
+    pub(crate) async fn apply_manifest_yaml_with_outcome(
+        &self,
+        manifest_yaml: String,
+        manifest_base_dir: Option<PathBuf>,
+    ) -> Result<AppliedServiceHandle> {
         if self.is_local() {
             let fungi_home = self.services.inner.fungi_dir.clone();
             let base_dir = manifest_base_dir.unwrap_or_else(|| fungi_home.clone());
@@ -353,16 +369,31 @@ impl DeviceServices {
                     applied.previous_manifest.as_ref(),
                     false,
                 )
-                .await?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "service manifest applied, but failed to update endpoint listeners; final phase: {}",
+                        applied.outcome.final_status.phase
+                    )
+                })?;
                 sync_service_endpoint_listeners_by_name(
                     &self.services.inner.local.runtime,
                     &self.services.inner.local.tcp_tunneling,
                     &applied.instance.name,
                     true,
                 )
-                .await?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "service manifest applied, but failed to publish endpoint listeners; final phase: {}",
+                        applied.outcome.final_status.phase
+                    )
+                })?;
             }
-            Ok(self.service(applied.instance.name))
+            Ok(AppliedServiceHandle {
+                service: self.service(applied.instance.name),
+                outcome: Some(applied.outcome),
+            })
         } else {
             let response = self
                 .services
@@ -378,7 +409,10 @@ impl DeviceServices {
                 .ok_or_else(|| {
                     anyhow::anyhow!("service apply response did not include a service")
                 })?;
-            Ok(self.service(service_name))
+            Ok(AppliedServiceHandle {
+                service: self.service(service_name),
+                outcome: response.apply_outcome,
+            })
         }
     }
 

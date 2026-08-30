@@ -238,8 +238,11 @@ impl ServiceControlProtocolControl {
                                 Err(error) => {
                                     return ServiceControlResponse::error(
                                         request_id.clone(),
-                                        "execution_failed",
-                                        error.to_string(),
+                                        "partial_apply",
+                                        format!(
+                                            "Service manifest applied, but failed to update endpoint listeners: {error}. Final phase: {}",
+                                            applied.outcome.final_status.phase
+                                        ),
                                     );
                                 }
                             }
@@ -254,13 +257,20 @@ impl ServiceControlProtocolControl {
                                 Err(error) => {
                                     return ServiceControlResponse::error(
                                         request_id.clone(),
-                                        "execution_failed",
-                                        error.to_string(),
+                                        "partial_apply",
+                                        format!(
+                                            "Service manifest applied, but failed to publish endpoint listeners: {error}. Final phase: {}",
+                                            applied.outcome.final_status.phase
+                                        ),
                                     );
                                 }
                             }
                         }
-                        Ok(applied.instance.name)
+                        return ServiceControlResponse::success_applied(
+                            request_id,
+                            applied.instance.name,
+                            applied.outcome,
+                        );
                     }
                     Err(error) => Err(error),
                 }

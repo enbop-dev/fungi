@@ -1002,6 +1002,15 @@ publish:
         .await
         .unwrap();
     assert_eq!(applied_v1.instance.name, "demo");
+    assert_eq!(
+        applied_v1.outcome.manifest_change,
+        ServiceManifestChange::Created
+    );
+    assert_eq!(
+        applied_v1.outcome.workload_action,
+        ServiceWorkloadAction::None
+    );
+    assert_eq!(applied_v1.outcome.final_status.phase, ServicePhase::Stopped);
 
     let local_service_id = fs::read_dir(fungi_home.join("services"))
         .unwrap()
@@ -1017,6 +1026,7 @@ publish:
         .join("component.wasm");
     assert_eq!(fs::read(&staged_component).unwrap(), b"wasm-v1");
 
+    control.start_by_name("demo").await.unwrap();
     control.start_by_name("demo").await.unwrap();
 
     let manifest_v2 = format!(
@@ -1057,6 +1067,37 @@ publish:
     );
     assert_eq!(fs::read(&staged_component).unwrap(), b"wasm-v2");
     assert!(applied_v2.instance.status.is_running());
+    assert_eq!(
+        applied_v2.outcome.manifest_change,
+        ServiceManifestChange::Changed
+    );
+    assert_eq!(
+        applied_v2.outcome.workload_action,
+        ServiceWorkloadAction::Restarted
+    );
+    assert_eq!(applied_v2.outcome.final_status.phase, ServicePhase::Running);
+
+    let reapplied_v2 = control
+        .apply_manifest_yaml(
+            &manifest_v2,
+            temp_dir.path(),
+            &fungi_home,
+            &ManifestResolutionPolicy,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reapplied_v2.outcome.manifest_change,
+        ServiceManifestChange::Unchanged
+    );
+    assert_eq!(
+        reapplied_v2.outcome.workload_action,
+        ServiceWorkloadAction::Restarted
+    );
+    assert_eq!(
+        reapplied_v2.outcome.final_status.phase,
+        ServicePhase::Running
+    );
 }
 
 #[tokio::test]
