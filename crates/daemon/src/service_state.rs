@@ -435,8 +435,7 @@ fn local_service_id_from_service_dir(service_dir: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use crate::runtime::{
-        RuntimeKind, ServicePort, ServicePortAllocation, ServicePortProtocol, ServiceRunMode,
-        ServiceSource,
+        RuntimeKind, ServicePort, ServicePortAllocation, ServicePortProtocol, ServiceSource,
     };
     use fungi_config::paths::FungiPaths;
 
@@ -450,7 +449,6 @@ mod tests {
             name: "demo".into(),
             definition_id: Some("demo-definition".into()),
             runtime: RuntimeKind::Docker,
-            run_mode: ServiceRunMode::Command,
             source: ServiceSource::Docker {
                 image: "nginx:latest".into(),
             },
@@ -523,7 +521,6 @@ mod tests {
             name: "demo".into(),
             definition_id: None,
             runtime: RuntimeKind::Docker,
-            run_mode: ServiceRunMode::Command,
             source: ServiceSource::Docker {
                 image: "nginx:latest".into(),
             },

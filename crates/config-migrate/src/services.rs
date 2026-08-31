@@ -241,8 +241,6 @@ fn migrate_legacy_service_manifest(
 
     let run = CurrentServiceRun {
         provider: runtime.into(),
-        mode: (runtime == LegacyRuntimeKind::Wasmtime && !publish.is_empty())
-            .then_some(CurrentServiceRunMode::Http),
         source,
         args: manifest.command,
         env: manifest.env,
@@ -502,8 +500,6 @@ impl From<LegacyRuntimeKind> for CurrentServiceProvider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CurrentServiceRun {
     provider: CurrentServiceProvider,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<CurrentServiceRunMode>,
     source: CurrentServiceSource,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     args: Vec<String>,
@@ -511,12 +507,6 @@ struct CurrentServiceRun {
     env: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mounts: Vec<CurrentServiceMount>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum CurrentServiceRunMode {
-    Http,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

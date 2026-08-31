@@ -9,9 +9,7 @@ use std::{
 };
 
 use fungi_config::{FungiConfig, devices::DevicesConfig};
-use fungi_daemon::{
-    ServicePortAllocation, ServiceRunMode, ServiceSource, load_service_manifest_yaml_file,
-};
+use fungi_daemon::{ServicePortAllocation, ServiceSource, load_service_manifest_yaml_file};
 use libp2p::PeerId;
 use serde_json::json;
 use tempfile::TempDir;
@@ -198,7 +196,6 @@ fn cli_migrate_upgrades_real_v061_home_with_legacy_address_book_and_service_stat
 
     let manifest = load_service_manifest_yaml_file(&manifest_path, home.path()).unwrap();
     assert_eq!(manifest.name, "demo");
-    assert_eq!(manifest.run_mode, ServiceRunMode::Http);
     assert_eq!(manifest.working_dir, None);
     assert_eq!(manifest.mounts.len(), 1);
     assert_eq!(manifest.ports[0].host_port, 18080);

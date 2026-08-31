@@ -642,7 +642,7 @@ fn migrates_legacy_service_state_into_local_service_id_layout_and_moves_service_
     assert_eq!(manifest["fungi"], "service/v1");
     assert_eq!(manifest["id"], "demo");
     assert_eq!(manifest["run"]["provider"], "wasmtime");
-    assert_eq!(manifest["run"]["mode"], "http");
+    assert!(manifest["run"]["mode"].is_null());
     assert_eq!(
         manifest["run"]["source"]["file"],
         "$fungi.service.artifacts/component.wasm"

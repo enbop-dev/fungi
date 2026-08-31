@@ -31,7 +31,6 @@ fn docker_manifest_maps_to_container_spec() {
         name: "filebrowser".into(),
         definition_id: None,
         runtime: RuntimeKind::Docker,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::Docker {
             image: "filebrowser/filebrowser:latest".into(),
         },
@@ -66,7 +65,6 @@ fn docker_manifest_can_use_internal_container_name() {
         name: "c".into(),
         definition_id: Some("code-server".into()),
         runtime: RuntimeKind::Docker,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::Docker {
             image: "ghcr.io/coder/code-server:latest".into(),
         },
@@ -94,7 +92,6 @@ fn ensure_manifest_mount_dirs_creates_missing_host_paths() {
         name: "mount-test".into(),
         definition_id: None,
         runtime: RuntimeKind::Wasmtime,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::WasmtimeFile {
             component: temp_dir.path().join("demo.wasm"),
         },
@@ -146,7 +143,6 @@ fn docker_manifest_rejects_wrong_source_type() {
         name: "bad".into(),
         definition_id: None,
         runtime: RuntimeKind::Docker,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::WasmtimeFile {
             component: PathBuf::from("/tmp/app.wasm"),
         },
@@ -180,7 +176,6 @@ async fn wasmtime_provider_runs_fake_launcher_and_collects_logs() {
         name: "demo-service".into(),
         definition_id: None,
         runtime: RuntimeKind::Wasmtime,
-        run_mode: ServiceRunMode::Http,
         source: ServiceSource::WasmtimeFile {
             component: component.clone(),
         },
@@ -242,7 +237,9 @@ async fn wasmtime_provider_runs_fake_launcher_and_collects_logs() {
         sleep(Duration::from_millis(100)).await;
     }
     assert!(logs.text.contains("fake-launcher"));
-    assert!(logs.text.contains("serve"));
+    assert!(logs.text.contains("run"));
+    assert!(!logs.text.contains("serve"));
+    assert!(logs.text.contains("-Shttp"));
     assert!(logs.text.contains("-Stcp"));
     assert!(logs.text.contains("-Sinherit-network"));
     assert!(logs.text.contains("-Sallow-ip-name-lookup"));
@@ -263,7 +260,6 @@ fn wasmtime_tcp_entry_runs_command_with_network_permissions() {
         name: "tcp-service".into(),
         definition_id: None,
         runtime: RuntimeKind::Wasmtime,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::WasmtimeFile {
             component: component.clone(),
         },
@@ -312,6 +308,7 @@ fn wasmtime_tcp_entry_runs_command_with_network_permissions() {
     assert!(args.iter().any(|arg| arg == "run"));
     assert!(!args.iter().any(|arg| arg == "serve"));
     assert!(args.iter().any(|arg| arg == "-Scli"));
+    assert!(args.iter().any(|arg| arg == "-Shttp"));
     assert!(args.iter().any(|arg| arg == "-Stcp"));
     assert!(args.iter().any(|arg| arg == "-Sinherit-network"));
     assert!(args.iter().any(|arg| arg == "-Sallow-ip-name-lookup"));
@@ -326,7 +323,6 @@ fn wasmtime_command_android_home_override_matches_target_behavior() {
         name: "android-home".into(),
         definition_id: None,
         runtime: RuntimeKind::Wasmtime,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::WasmtimeFile {
             component: component.clone(),
         },
@@ -372,14 +368,13 @@ fn wasmtime_command_android_home_override_matches_target_behavior() {
 }
 
 #[test]
-fn wasmtime_http_mode_without_tcp_port_returns_error() {
+fn wasmtime_command_without_tcp_ports_omits_network_permissions() {
     let temp_dir = TempDir::new().unwrap();
     let component = temp_dir.path().join("demo.wasm");
     let manifest = ServiceManifest {
         name: "http-service".into(),
         definition_id: None,
         runtime: RuntimeKind::Wasmtime,
-        run_mode: ServiceRunMode::Http,
         source: ServiceSource::WasmtimeFile {
             component: component.clone(),
         },
@@ -412,10 +407,19 @@ fn wasmtime_http_mode_without_tcp_port_returns_error() {
         last_exit_code: None,
     };
 
-    let error = build_wasmtime_command(Path::new("/bin/fungi"), temp_dir.path(), &state)
-        .expect_err("http mode without a TCP port should be rejected");
+    let command = build_wasmtime_command(Path::new("/bin/fungi"), temp_dir.path(), &state).unwrap();
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
 
-    assert!(error.to_string().contains("requires at least one TCP port"));
+    assert!(args.iter().any(|arg| arg == "run"));
+    assert!(!args.iter().any(|arg| arg == "serve"));
+    assert!(args.iter().any(|arg| arg == "-Shttp"));
+    assert!(!args.iter().any(|arg| arg == "-Stcp"));
+    assert!(!args.iter().any(|arg| arg == "-Sinherit-network"));
+    assert!(!args.iter().any(|arg| arg == "-Sallow-ip-name-lookup"));
 }
 
 #[test]
@@ -540,7 +544,6 @@ publish:
 
     assert_eq!(manifest.name, "code-server");
     assert_eq!(manifest.runtime, RuntimeKind::Docker);
-    assert_eq!(manifest.run_mode, ServiceRunMode::Command);
     assert_eq!(manifest.mounts[0].host_path, paths.user_home());
     assert_eq!(manifest.ports[0].service_port, 8080);
     assert_eq!(
@@ -561,7 +564,7 @@ publish:
 }
 
 #[test]
-fn fungi_service_file_maps_wasmtime_http_mode_to_serve_intent() {
+fn fungi_service_file_rejects_removed_wasmtime_http_mode() {
     let content = r#"
 fungi: service/v1
 id: filebrowser-lite
@@ -579,11 +582,41 @@ publish:
       path: /
 "#;
 
+    let error = parse_service_manifest_yaml(content, Path::new("."), Path::new("/tmp/fungi-home"))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `mode`"));
+}
+
+#[test]
+fn fungi_service_file_maps_wasmtime_listener_to_run_args() {
+    let content = r#"
+fungi: service/v1
+id: filebrowser-lite
+run:
+  provider: wasmtime
+  source:
+    url: https://example.test/filebrowser.wasm
+  args:
+    - --listen
+    - 127.0.0.1:8082
+publish:
+  http:
+    tcp:
+      port: 8082
+    client:
+      kind: web
+      path: /
+"#;
+
     let manifest =
         parse_service_manifest_yaml(content, Path::new("."), Path::new("/tmp/fungi-home")).unwrap();
 
     assert_eq!(manifest.runtime, RuntimeKind::Wasmtime);
-    assert_eq!(manifest.run_mode, ServiceRunMode::Http);
+    assert_eq!(
+        manifest.command,
+        ["--listen".to_string(), "127.0.0.1:8082".to_string()]
+    );
     assert_eq!(manifest.ports[0].host_port, 8082);
     assert_eq!(
         manifest.ports[0].host_port_allocation,
@@ -928,7 +961,6 @@ async fn wasmtime_provider_downloads_remote_component() {
         name: "download-service".into(),
         definition_id: None,
         runtime: RuntimeKind::Wasmtime,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::WasmtimeUrl {
             url: server.url.clone(),
         },
@@ -1415,7 +1447,6 @@ fn existing_tcp_manifest(name: &str, host: &str, port: u16) -> ServiceManifest {
         name: name.to_string(),
         definition_id: None,
         runtime: RuntimeKind::External,
-        run_mode: ServiceRunMode::Command,
         source: ServiceSource::ExistingTcp {
             host: host.to_string(),
             port,
