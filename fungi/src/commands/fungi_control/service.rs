@@ -1142,6 +1142,10 @@ fn partial_apply_message(
     message
 }
 
+fn running_phase_verified(status: &ServiceStatus, start_error: Option<&str>) -> bool {
+    status.is_running() && start_error.is_none()
+}
+
 async fn finish_local_apply(
     client: &mut RpcClient,
     response: ServiceInstanceResponse,
@@ -1166,7 +1170,7 @@ async fn finish_local_apply(
             .map(|error| error.message().to_string());
         let inspected = try_inspect_local_service(client, service_name.clone()).await;
         match inspected {
-            Ok(instance) if instance.status.is_running() => {
+            Ok(instance) if running_phase_verified(&instance.status, start_error.as_deref()) => {
                 outcome.final_status = instance.status;
                 if !was_running && has_managed_workload {
                     outcome.workload_action = ServiceWorkloadAction::Started;
@@ -1225,7 +1229,7 @@ async fn finish_remote_apply(
             .map(|error| error.message().to_string());
         let inspected = try_inspect_remote_service(client, &device.peer_id, &service_name).await;
         match inspected {
-            Ok(service) if service.status.is_running() => {
+            Ok(service) if running_phase_verified(&service.status, start_error.as_deref()) => {
                 outcome.final_status = service.status;
                 if !was_running && service.runtime != RuntimeKind::External {
                     outcome.workload_action = ServiceWorkloadAction::Started;
@@ -3096,6 +3100,17 @@ mod tests {
         assert!(message.contains("requested final phase `running`"));
         assert!(message.contains("Final state: stopped"));
         assert!(message.contains("Start error: launcher failed"));
+    }
+
+    #[test]
+    fn running_phase_is_not_verified_when_start_reports_an_error() {
+        let status = ServiceStatus::running();
+
+        assert!(running_phase_verified(&status, None));
+        assert!(!running_phase_verified(
+            &status,
+            Some("listener synchronization failed")
+        ));
     }
 
     #[test]
