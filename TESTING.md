@@ -51,54 +51,67 @@ cargo run --package fungi-tests --bin test-relay-config-cli
 
 ## Local CLI lab
 
-Use `fungi-lab` for an interactive, real-process A/B environment. It starts one local relay and two daemons, disables community relays, and saves both devices. Neither node trusts the other by default.
+`fungi-lab` creates and operates a local relay + A/B daemon environment. Source
+checkout, compilation, test scenarios, and assertions belong to the caller.
+Reuse existing binaries and the Rust build cache.
 
 ```bash
 cargo build -p fungi -p fungi-lab
 ./target/debug/fungi-lab start
-
 eval "$(./target/debug/fungi-lab env)"
-"$FUNGI_BIN" -f "$FUNGI_A_DIR" service list
-"$FUNGI_BIN" -f "$FUNGI_B_DIR" device trusted
 
-./target/debug/fungi-lab node stop b
-./target/debug/fungi-lab node start b
+"$FUNGI_BIN" -f "$FUNGI_A_DIR" info id
+"$FUNGI_BIN" -f "$FUNGI_B_DIR" device trusted
+./target/debug/fungi-lab node restart a
+./target/debug/fungi-lab relay restart
 ./target/debug/fungi-lab stop
 ```
 
-`--lab-dir PATH` (or `FUNGI_LAB_DIR`) selects the same lab for every command;
-the default is `target/local-lab`. This is a data directory, not a checkout.
-It contains `state.json`, logs, `relay-home/`, and `nodes/{a,b}/fungi/`.
-Fungi's sibling user directories also stay inside each node's directory.
-Reuse the source checkout and Rust build cache for separate labs.
-`start --fungi-bin PATH` can select another built Fungi binary.
+All commands select the same instance with `--lab-dir PATH` or
+`FUNGI_LAB_DIR` (CLI > environment > `target/local-lab` in the checkout).
+This is a data directory containing `state.json`, logs, `relay-home/`, and
+`nodes/{a,b}/fungi/`. Fungi's sibling user directories stay under each node.
+`start --fungi-bin PATH` selects another built binary; later commands reuse it.
 
-`start` refuses to replace a running manager. `stop` retains data and logs;
-`start` after `stop` reuses identities and resets trust to the requested mode.
-`node restart a` and `relay restart` append a timestamped log boundary; the relay
-keeps its identity and ports. The manager stops the lab after two hours.
-Use `clean` to stop and delete a lab whose evidence is no longer needed.
-Commands that change a lab are serialized; a concurrent command reports that it is busy.
+There is no background manager, watchdog, or automatic expiry. Each command
+performs its operation and exits; relay and daemons continue until stopped.
+Tests and Agents must call `stop` in their cleanup path. `clean` also deletes
+the owned lab directory, so use it only after retaining any needed evidence.
+`start` refuses to replace any running lab process. After `stop`, it reuses
+identities and resets trust to the requested mode. Restart appends log boundaries;
+relay identity and ports remain stable.
 
-For service-management tests, explicitly use `start --trust b-trusts-a` or
-`trust b-trusts-a` (B grants A access). `a-trusts-b`, `both`, and `none` are also
-supported. These grants persist until `trust none`, a subsequent start resetting
-trust, or cleanup. Only use them for the local test nodes; inspect `fungi security show`
-on the granting node to see its host-path exposure.
+Nodes use dynamic RPC/TCP/UDP ports. Use their `fungi-dir` with the Fungi CLI;
+it discovers RPC through `daemon.endpoint`. Lab state does not cache these
+ports or a readiness/trust flag. `status --json` combines recorded identities
+with live process checks and derived paths; running is not proof of readiness or
+connectivity. Use `info id`, `device trusted`, and bounded `ping` to test those.
 
-State version 2 intentionally rejects older state and arbitrary external node
-directories. Stop and clean old labs with the old binary before upgrading, or
-choose a fresh `--lab-dir`. Corrupt state or an unrecognized directory is retained
-with an error; there is no force-delete or migration mode. Port conflicts report
-failure and preserve logs; automatic port retries are not implemented.
+Trust defaults to none. Explicitly use `start --trust b-trusts-a` or
+`trust b-trusts-a` for B to grant A service-management access. Other modes are
+`a-trusts-b`, `both`, and `none`. Grants print peer IDs, host-path exposure,
+and revocation instructions. If a trust operation fails, inspect both nodes:
+a partial grant may have persisted. Do not use lab trust commands for real devices.
 
-Lab state/CLI regression checks run with `cargo test -p fungi-lab`. After building
-both binaries, explicitly run the local-process fault and expiry checks:
+Mutating commands hold one file lock. State writes are atomic; each spawned
+process is recorded before readiness checks. Normal startup failures/timeouts
+reclaim only that operation's new children and retain logs. Abruptly killing the
+lab command can leave processes running; use `stop` with the same lab directory
+to recover recorded children. There is no claim of automatic recovery from
+SIGKILL or a crash between spawning a child and recording it.
+
+State version 3 rejects old/invalid state and unrecognized directories without
+deleting them. Stop/clean older labs with the previous binary before upgrading,
+or select a fresh directory. There is no migration, force-delete, automatic port
+retry, or multi-node topology configuration. Only the relay still needs explicit
+ports; conflicts fail with logs retained.
 
 ```bash
+cargo test -p fungi-lab
+# Requires built fungi/fungi-lab and local sockets; creates only temporary labs.
 cargo test -p fungi-lab real_ -- --ignored --test-threads=1
 ```
 
-These checks use temporary lab data with the existing debug Fungi binary. They
-cover failures after relay/node startup, startup cancellation, and expiry cleanup.
-They do not launch Docker services or require a two-hour wait.
+The checks cover state/ownership, scoped rollback and timeout cleanup, dynamic
+node configuration, CLI persistence and RPC discovery after restart, trust
+directions, and log retention. They do not deploy Docker services.

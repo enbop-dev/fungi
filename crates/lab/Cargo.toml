@@ -18,5 +18,6 @@ clap = { workspace = true, features = ["env"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sysinfo = { workspace = true }
+toml = { workspace = true }
 
 tempfile = { workspace = true }

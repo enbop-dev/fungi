@@ -2,12 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::runtime::{
-    clean_lab, configure_trust, manage_node, manage_relay, print_env, print_status, run_manager,
-    start_background_lab, stop_selected_lab,
-};
-use crate::state::{NodeCommand, ProcessCommand, TrustMode};
-use crate::util::selected_root;
+use crate::runtime;
+use crate::state::{Lab, NodeCommand, ProcessCommand, Target, TrustMode, lock_lab, selected_root};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,25 +27,28 @@ impl LabCli {
     pub fn run(self) -> Result<()> {
         let root = selected_root(self.root)?;
         let _lock = match &self.command {
-            LabCommand::Manager(_) | LabCommand::Status(_) | LabCommand::Env => None,
-            LabCommand::Start(_) => Some(crate::util::lock_lab(&root, true)?),
-            _ => Some(crate::util::lock_lab(&root, false)?),
+            LabCommand::Status(_) | LabCommand::Env => None,
+            LabCommand::Start(_) => Some(lock_lab(&root, true)?),
+            _ => Some(lock_lab(&root, false)?),
         };
+        let root = root.canonicalize()?;
         match self.command {
-            LabCommand::Start(mut args) => {
-                args.root = Some(root);
-                start_background_lab(args)
+            LabCommand::Start(args) => runtime::start(&root, args),
+            LabCommand::Status(args) => runtime::print_status(&Lab::load(&root)?, args.json),
+            LabCommand::Stop => Lab::load(&root)?.stop(&[Target::A, Target::B, Target::Relay]),
+            LabCommand::Clean => runtime::clean(&root),
+            LabCommand::Env => runtime::print_env(&Lab::load(&root)?),
+            LabCommand::Node { command } => {
+                let (node, operation) = match command {
+                    NodeCommand::Start { node } => (node, ProcessCommand::Start),
+                    NodeCommand::Stop { node } => (node, ProcessCommand::Stop),
+                    NodeCommand::Restart { node } => (node, ProcessCommand::Restart),
+                };
+                Lab::load(&root)?.manage(node.into(), operation)
             }
-            LabCommand::Status(args) => print_status(&root, args),
-            LabCommand::Stop => stop_selected_lab(&root),
-            LabCommand::Clean => clean_lab(&root),
-            LabCommand::Env => print_env(&root),
-            LabCommand::Node { command } => manage_node(&root, command),
-            LabCommand::Relay { command } => manage_relay(&root, command),
-            LabCommand::Trust { mode } => configure_trust(&root, mode),
-            LabCommand::Manager(mut args) => {
-                args.root = root;
-                run_manager(args)
+            LabCommand::Relay { command } => Lab::load(&root)?.manage(Target::Relay, command),
+            LabCommand::Trust { mode } => {
+                Lab::load(&root)?.trust(mode, std::time::Instant::now() + runtime::STARTUP_TIMEOUT)
             }
         }
     }
@@ -82,8 +81,6 @@ pub(crate) enum LabCommand {
         #[arg(value_enum)]
         mode: TrustMode,
     },
-    #[command(hide = true)]
-    Manager(ManagerArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -91,8 +88,6 @@ pub(crate) struct StartArgs {
     /// Path to the fungi binary. Defaults to target/debug/fungi next to this binary.
     #[arg(long = "fungi-bin")]
     pub(crate) fungi_bin: Option<PathBuf>,
-    #[arg(skip)]
-    pub(crate) root: Option<PathBuf>,
     /// Trusted-device direction to configure after startup.
     #[arg(long, value_enum, default_value_t = TrustMode::None)]
     pub(crate) trust: TrustMode,
@@ -102,18 +97,6 @@ pub(crate) struct StartArgs {
 pub(crate) struct StatusArgs {
     #[arg(long)]
     pub(crate) json: bool,
-}
-
-#[derive(Parser, Debug, Clone)]
-pub(crate) struct ManagerArgs {
-    #[arg(long)]
-    pub(crate) repo: PathBuf,
-    #[arg(long = "fungi-bin")]
-    pub(crate) fungi_bin: PathBuf,
-    #[arg(skip)]
-    pub(crate) root: PathBuf,
-    #[arg(long, value_enum)]
-    pub(crate) trust: TrustMode,
 }
 
 #[cfg(test)]

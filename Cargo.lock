@@ -1686,6 +1686,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
