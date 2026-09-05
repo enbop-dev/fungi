@@ -8,7 +8,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use sysinfo::{Pid, Process, Signal, System};
+use sysinfo::{Pid, Process, ProcessStatus, Signal, System};
 
 use crate::state::ProcessSpec;
 use crate::util::wait_ready_with_bin;
@@ -200,6 +200,12 @@ pub(crate) fn stop_pid(pid: Option<u32>, spec: &ProcessSpec, force: bool) -> Res
     let Some(system) = system_with_process(pid) else {
         return Ok(());
     };
+    if system
+        .process(Pid::from_u32(pid))
+        .is_some_and(|p| p.status() == ProcessStatus::Zombie)
+    {
+        return Ok(());
+    }
     if !process_matches(&system, pid, spec) {
         bail!(
             "refusing to stop pid {pid}: process does not match expected {} lab process",
@@ -225,10 +231,19 @@ pub(crate) fn stop_pid(pid: Option<u32>, spec: &ProcessSpec, force: bool) -> Res
         && let Some(system) = system_with_process(pid)
         && let Some(process) = system.process(Pid::from_u32(pid))
     {
-        let _ = process.kill();
+        if !process_matches(&system, pid, spec) {
+            bail!("pid {pid} changed identity while stopping {}", spec.label);
+        }
+        process.kill();
     }
-
-    Ok(())
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if !process_is_running(Some(pid), spec) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!("{} pid {pid} did not stop", spec.label)
 }
 
 pub(crate) fn process_is_running(pid: Option<u32>, spec: &ProcessSpec) -> bool {
@@ -249,11 +264,13 @@ fn system_with_process(pid: u32) -> Option<System> {
     }
 }
 
-fn process_matches(system: &System, pid: u32, spec: &ProcessSpec) -> bool {
+pub(crate) fn process_matches(system: &System, pid: u32, spec: &ProcessSpec) -> bool {
     let Some(process) = system.process(Pid::from_u32(pid)) else {
         return false;
     };
-    process_matches_exe(process, spec) && process_matches_cmd(process, spec)
+    process.status() != ProcessStatus::Zombie
+        && process_matches_exe(process, spec)
+        && process_matches_cmd(process, spec)
 }
 
 fn process_matches_exe(process: &Process, spec: &ProcessSpec) -> bool {
@@ -267,15 +284,9 @@ fn process_matches_exe(process: &Process, spec: &ProcessSpec) -> bool {
 }
 
 fn process_matches_cmd(process: &Process, spec: &ProcessSpec) -> bool {
-    let cmd = process
-        .cmd()
-        .iter()
-        .map(|part| part.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
     spec.cmd_contains
         .iter()
-        .all(|expected| cmd.contains(expected))
+        .all(|expected| process.cmd().iter().any(|part| part == expected.as_str()))
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {

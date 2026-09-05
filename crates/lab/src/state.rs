@@ -2,7 +2,7 @@ use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum TrustMode {
     Both,
     BTrustsA,
@@ -43,6 +43,7 @@ pub(crate) struct LabState {
     pub(crate) repo: PathBuf,
     pub(crate) root: PathBuf,
     pub(crate) fungi_bin: PathBuf,
+    pub(crate) manager_bin: PathBuf,
     pub(crate) manager_pid: Option<u32>,
     #[serde(default)]
     pub(crate) ready: bool,
@@ -132,12 +133,8 @@ impl LabState {
     pub(crate) fn process_spec_for_manager(&self) -> ProcessSpec {
         ProcessSpec {
             label: "manager",
-            exe: None,
-            cmd_contains: vec![
-                "fungi-lab".to_string(),
-                "manager".to_string(),
-                self.root.display().to_string(),
-            ],
+            exe: Some(self.manager_bin.clone()),
+            cmd_contains: vec!["manager".to_string(), self.root.display().to_string()],
         }
     }
 

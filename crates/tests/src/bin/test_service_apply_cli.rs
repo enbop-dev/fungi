@@ -49,15 +49,10 @@ fn main() -> Result<()> {
     };
 
     docker_cleanup([LOCAL_SERVICE, REMOTE_SERVICE]);
-    run_lab(&fungi_lab_bin, &repo, ["clean"])?;
-    run_lab(
-        &fungi_lab_bin,
-        &repo,
-        ["start", "--ttl-secs", "1800", "--trust", "both"],
-    )?;
+    run_lab(&fungi_lab_bin, &repo, ["start", "--trust", "both"])?;
 
-    let node_a = repo.join("target/tmp_a");
-    let node_b = repo.join("target/tmp_b");
+    let node_a = lab_dir(&repo).join("nodes/a/fungi");
+    let node_b = lab_dir(&repo).join("nodes/b/fungi");
 
     println!("\n=== Local apply lifecycle ===");
     apply_service(&fungi_bin, &node_a, LOCAL_SERVICE, &local_v116)?;
@@ -142,12 +137,12 @@ impl Drop for CleanupGuard {
         docker_cleanup([LOCAL_SERVICE, REMOTE_SERVICE]);
         let _ = run_cli(
             &self.fungi_bin,
-            &self.repo.join("target/tmp_a"),
+            &lab_dir(&self.repo).join("nodes/a/fungi"),
             ["service", "remove", LOCAL_SERVICE, "--yes"],
         );
         let _ = run_cli(
             &self.fungi_bin,
-            &self.repo.join("target/tmp_a"),
+            &lab_dir(&self.repo).join("nodes/a/fungi"),
             ["service", "remove", &format!("{REMOTE_SERVICE}@b"), "--yes"],
         );
         let _ = run_lab(&self.fungi_lab_bin, &self.repo, ["stop"]);
@@ -215,12 +210,18 @@ fn docker_cleanup<const N: usize>(names: [&str; N]) {
         .output();
 }
 
+fn lab_dir(repo: &Path) -> PathBuf {
+    repo.join(format!("target/service-apply-lab-{}", std::process::id()))
+}
+
 fn run_lab<I, S>(fungi_lab_bin: &Path, repo: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let output = Command::new(fungi_lab_bin)
+        .arg("--lab-dir")
+        .arg(lab_dir(repo))
         .args(
             args.into_iter()
                 .map(|value| value.as_ref().to_string())
