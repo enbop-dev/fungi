@@ -55,9 +55,18 @@ fn mutating_commands_are_exclusive_and_unowned_data_is_preserved() {
     );
     let root = temp.path().join("lab");
     let lock = lock_lab(&root, true).unwrap();
-    assert!(lock_lab(&root, false).is_err());
+    fixture(&root).save().unwrap();
+    Lab::load(&root).expect("the ownership marker must remain readable while locked");
+    assert!(
+        lock_lab(&root, false)
+            .unwrap_err()
+            .to_string()
+            .contains("another command is managing this lab")
+    );
     drop(lock);
     assert!(lock_lab(&root, false).is_ok());
+    let root = temp.path().join("failed-start");
+    let _lock = lock_lab(&root, true).unwrap();
     let missing_bin = temp.path().join("missing-fungi");
     assert!(
         runtime::start(
@@ -71,6 +80,21 @@ fn mutating_commands_are_exclusive_and_unowned_data_is_preserved() {
     );
     runtime::clean(&root).unwrap();
     assert!(!root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_lock_is_rejected_without_touching_its_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("lab");
+    drop(lock_lab(&root, true).unwrap());
+    let target = temp.path().join("keep");
+    fs::write(&target, "user data").unwrap();
+    fs::remove_file(root.join(state::LOCK_FILE)).unwrap();
+    std::os::unix::fs::symlink(&target, root.join(state::LOCK_FILE)).unwrap();
+    assert!(lock_lab(&root, false).is_err());
+    assert!(runtime::clean(&root).is_err());
+    assert_eq!(fs::read_to_string(target).unwrap(), "user data");
 }
 
 #[cfg(unix)]

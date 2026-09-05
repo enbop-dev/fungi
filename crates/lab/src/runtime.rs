@@ -314,9 +314,13 @@ pub(crate) fn clean(root: &Path) -> Result<()> {
     if root.parent().is_none() || protected.iter().any(|p| p.starts_with(root)) {
         bail!("refusing to remove a broad/protected lab directory");
     }
-    // A failed binary lookup can leave only the ownership marker: no process
+    // A failed binary lookup can leave only the ownership marker and lock: no process
     // can have been spawned before the initial state was written.
-    if fs::read_dir(root)?.all(|entry| entry.is_ok_and(|e| e.file_name() == ".fungi-lab")) {
+    if fs::read_dir(root)?.all(|entry| {
+        entry.is_ok_and(|e| {
+            e.file_name() == ".fungi-lab" || e.file_name() == crate::state::LOCK_FILE
+        })
+    }) {
         fs::remove_dir_all(root)?;
         println!("Removed empty lab directory at {}.", root.display());
         return Ok(());

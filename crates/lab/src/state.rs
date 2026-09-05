@@ -12,6 +12,7 @@ use crate::process::ProcessId;
 pub(crate) const STATE_FILE: &str = "state.json";
 const VERSION: u32 = 3;
 const MARKER: &str = ".fungi-lab";
+pub(crate) const LOCK_FILE: &str = ".fungi-lab.lock";
 const OWNER: &str = "fungi-lab\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -195,7 +196,11 @@ pub(crate) fn lock_lab(root: &Path, initialize: bool) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(root.join(MARKER))?;
+        .create(true)
+        .truncate(false)
+        .open(root.join(LOCK_FILE))?;
+    // Windows locks also prevent reads through other handles. Keep the
+    // ownership marker readable while a mutating command holds the lock.
     file.try_lock()
         .context("another command is managing this lab; try again after it finishes")?;
     Ok(file)
@@ -212,6 +217,7 @@ pub(crate) fn validate_layout(root: &Path) -> Result<()> {
     reject_symlink(root)?;
     for name in [
         MARKER,
+        LOCK_FILE,
         STATE_FILE,
         "relay-home",
         "relay.log",

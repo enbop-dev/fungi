@@ -42,17 +42,18 @@ fn main() -> Result<()> {
         "/home/coder/project",
     )?;
 
+    let lab_dir = create_lab_dir(&repo)?;
     let _cleanup = CleanupGuard {
         fungi_bin: fungi_bin.clone(),
         fungi_lab_bin: fungi_lab_bin.clone(),
-        repo: repo.clone(),
+        lab_dir: lab_dir.clone(),
     };
 
     docker_cleanup([LOCAL_SERVICE, REMOTE_SERVICE]);
-    run_lab(&fungi_lab_bin, &repo, ["start", "--trust", "both"])?;
+    run_lab(&fungi_lab_bin, &lab_dir, ["start", "--trust", "both"])?;
 
-    let node_a = lab_dir(&repo).join("nodes/a/fungi");
-    let node_b = lab_dir(&repo).join("nodes/b/fungi");
+    let node_a = lab_dir.join("nodes/a/fungi");
+    let node_b = lab_dir.join("nodes/b/fungi");
 
     println!("\n=== Local apply lifecycle ===");
     apply_service(&fungi_bin, &node_a, LOCAL_SERVICE, &local_v116)?;
@@ -129,7 +130,7 @@ fn main() -> Result<()> {
 struct CleanupGuard {
     fungi_bin: PathBuf,
     fungi_lab_bin: PathBuf,
-    repo: PathBuf,
+    lab_dir: PathBuf,
 }
 
 impl Drop for CleanupGuard {
@@ -137,16 +138,21 @@ impl Drop for CleanupGuard {
         docker_cleanup([LOCAL_SERVICE, REMOTE_SERVICE]);
         let _ = run_cli(
             &self.fungi_bin,
-            &lab_dir(&self.repo).join("nodes/a/fungi"),
+            &self.lab_dir.join("nodes/a/fungi"),
             ["service", "remove", LOCAL_SERVICE, "--yes"],
         );
         let _ = run_cli(
             &self.fungi_bin,
-            &lab_dir(&self.repo).join("nodes/a/fungi"),
+            &self.lab_dir.join("nodes/a/fungi"),
             ["service", "remove", &format!("{REMOTE_SERVICE}@b"), "--yes"],
         );
-        let _ = run_lab(&self.fungi_lab_bin, &self.repo, ["stop"]);
-        let _ = run_lab(&self.fungi_lab_bin, &self.repo, ["clean"]);
+        let _ = run_lab(&self.fungi_lab_bin, &self.lab_dir, ["stop"]);
+        if let Err(error) = run_lab(&self.fungi_lab_bin, &self.lab_dir, ["clean"]) {
+            eprintln!(
+                "lab cleanup failed; retained {}: {error:#}",
+                self.lab_dir.display()
+            );
+        }
     }
 }
 
@@ -210,24 +216,44 @@ fn docker_cleanup<const N: usize>(names: [&str; N]) {
         .output();
 }
 
-fn lab_dir(repo: &Path) -> PathBuf {
-    repo.join(format!("target/service-apply-lab-{}", std::process::id()))
+fn create_lab_dir(repo: &Path) -> Result<PathBuf> {
+    let target = repo.join("target");
+    fs::create_dir_all(&target)?;
+    // Allocate once, atomically, even when a previous run left its data behind.
+    // Only fungi-lab clean may delete it: TempDir drop must not erase state if
+    // stopping the recorded processes fails.
+    Ok(tempfile::Builder::new()
+        .prefix("service-apply-lab-")
+        .tempdir_in(target)?
+        .keep())
 }
 
-fn run_lab<I, S>(fungi_lab_bin: &Path, repo: &Path, args: I) -> Result<String>
+#[test]
+fn lab_directories_are_unique_and_preserve_previous_runs() {
+    let repo = tempfile::tempdir().unwrap();
+    let first = create_lab_dir(repo.path()).unwrap();
+    let state = first.join("state.json");
+    fs::write(&state, "previous run").unwrap();
+    let second = create_lab_dir(repo.path()).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(first.parent(), second.parent());
+    assert_eq!(fs::read_to_string(state).unwrap(), "previous run");
+    assert!(fs::read_dir(second).unwrap().next().is_none());
+}
+
+fn run_lab<I, S>(fungi_lab_bin: &Path, lab_dir: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let output = Command::new(fungi_lab_bin)
         .arg("--lab-dir")
-        .arg(lab_dir(repo))
+        .arg(lab_dir)
         .args(
             args.into_iter()
                 .map(|value| value.as_ref().to_string())
                 .collect::<Vec<_>>(),
         )
-        .current_dir(repo)
         .output()
         .context("failed to execute fungi-lab command")?;
     if !output.status.success() {
