@@ -61,6 +61,9 @@ pub(crate) fn migrate_legacy_services_state(staging_root: &Path, live_root: &Pat
         let new_service_artifacts_dir = artifacts_root.join(&local_service_id);
         move_or_create_service_data_dir(&old_service_data_dir, &new_service_appdata_dir)?;
 
+        let configuration_error = (persisted_service.manifest._runtime == LegacyRuntimeKind::Wasmtime
+            && !persisted_service.manifest.ports.is_empty()).then(||
+                "Legacy Wasmtime HTTP service requires an upgraded run-compatible component. Apply an updated service recipe using the same instance name; the original component cannot be assumed to support wasi:cli/run.".to_string());
         let manifest_document = migrate_legacy_service_manifest(
             persisted_service.manifest,
             &old_live_service_data_dir,
@@ -89,6 +92,7 @@ pub(crate) fn migrate_legacy_services_state(staging_root: &Path, live_root: &Pat
             local_service_id: local_service_id.clone(),
             updated_at: legacy_updated_at.clone(),
             desired_state: persisted_service.desired_state.into(),
+            configuration_error,
         };
         let state_bytes = serde_json::to_vec_pretty(&state_file)
             .context("Failed to encode migrated managed service state.json")?;
@@ -256,7 +260,9 @@ fn migrate_legacy_service_manifest(
 
     Ok(CurrentServiceManifestDocument {
         fungi: "service/v1".to_string(),
-        id: manifest.name,
+        // Legacy HTTP services had an instance name but no recipe definition identity.
+        id: (runtime != LegacyRuntimeKind::Wasmtime).then(|| manifest.name.clone()),
+        instance: (runtime == LegacyRuntimeKind::Wasmtime).then_some(manifest.name),
         run,
         publish,
     })
@@ -467,6 +473,8 @@ impl From<LegacyDesiredServiceState> for CurrentDesiredServiceState {
 
 #[derive(Debug, Serialize)]
 struct CurrentServiceStateFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configuration_error: Option<String>,
     schema_version: u32,
     local_service_id: String,
     updated_at: String,
@@ -476,7 +484,10 @@ struct CurrentServiceStateFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CurrentServiceManifestDocument {
     fungi: String,
-    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance: Option<String>,
     run: CurrentServiceRun,
     publish: BTreeMap<String, CurrentServicePublishEntry>,
 }

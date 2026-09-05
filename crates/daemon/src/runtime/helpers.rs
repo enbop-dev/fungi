@@ -405,6 +405,7 @@ pub(crate) fn enrich_instance_from_manifest(
 
 fn service_instance_id(runtime: RuntimeKind, name: &str) -> String {
     let runtime_name = match runtime {
+        RuntimeKind::Unknown => "unknown",
         RuntimeKind::Docker => "docker",
         RuntimeKind::Wasmtime => "wasmtime",
         RuntimeKind::External => "external",

@@ -642,6 +642,7 @@ fn parse_fungi_publish_entry(
     }
 
     match runtime {
+        RuntimeKind::Unknown => bail!("unknown service runtime"),
         RuntimeKind::Docker => {
             if entry.tcp.host.is_some() {
                 bail!("publish.{name}.tcp.host is not used with provider: docker; omit it");

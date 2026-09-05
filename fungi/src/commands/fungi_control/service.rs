@@ -2192,6 +2192,7 @@ fn print_existing_apply_notice(
 
 fn runtime_kind_label(runtime: RuntimeKind) -> &'static str {
     match runtime {
+        RuntimeKind::Unknown => "unknown",
         RuntimeKind::Docker => "docker",
         RuntimeKind::Wasmtime => "wasmtime",
         RuntimeKind::External => "external",

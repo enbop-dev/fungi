@@ -9,6 +9,7 @@ use fungi::commands::{
 };
 
 #[test]
+#[cfg(feature = "wasi")]
 fn exposes_only_wasmtime_run_command() {
     let command = FungiArgs::command();
     let subcommands = command

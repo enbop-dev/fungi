@@ -87,6 +87,7 @@ impl RuntimeControl {
 
     pub fn supports(&self, runtime: RuntimeKind) -> bool {
         match runtime {
+            RuntimeKind::Unknown => false,
             RuntimeKind::Docker => self.docker.is_some(),
             RuntimeKind::Wasmtime => self.wasmtime_enabled,
             RuntimeKind::External => true,
@@ -126,6 +127,14 @@ impl RuntimeControl {
         self.ensure_runtime_enabled(manifest.runtime)?;
 
         let previous_service = { self.service_state.lock().persisted_service(&manifest.name) };
+        let failed_service = { self.service_state.lock().failed_service(&manifest.name) };
+        if let Some(failed) = &failed_service {
+            ensure_matching_definition_id(
+                &manifest.name,
+                failed.definition_id.as_deref(),
+                manifest.definition_id.as_deref(),
+            )?;
+        }
         let in_memory_manifest = self.service_manifests.lock().get(&manifest.name).cloned();
         let in_memory_runtime = self.service_index.lock().get(&manifest.name).copied();
         let previous_manifest = previous_service
@@ -140,8 +149,10 @@ impl RuntimeControl {
             .as_ref()
             .map(|manifest| manifest.runtime)
             .or(in_memory_runtime);
-        let replacing_existing =
-            previous_service.is_some() || previous_manifest.is_some() || previous_runtime.is_some();
+        let replacing_existing = previous_service.is_some()
+            || previous_manifest.is_some()
+            || previous_runtime.is_some()
+            || failed_service.is_some();
 
         if let Some(previous_manifest) = previous_manifest.as_ref() {
             ensure_definition_id_compatible(previous_manifest, manifest)?;
@@ -179,6 +190,7 @@ impl RuntimeControl {
         }
 
         let instance = match manifest.runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => {
                 self.docker_provider()?
                     .pull_with_container_name(manifest, &resolved_local_service_id)
@@ -198,13 +210,13 @@ impl RuntimeControl {
             RuntimeKind::External => Ok(self.external_instance_from_manifest(manifest, false)),
         }?;
 
+        self.persist_service(manifest, desired_state, Some(&resolved_local_service_id))?;
         self.service_index
             .lock()
             .insert(manifest.name.clone(), manifest.runtime);
         self.service_manifests
             .lock()
             .insert(manifest.name.clone(), manifest.clone());
-        self.persist_service(manifest, desired_state, Some(&resolved_local_service_id))?;
 
         let mut instance = enrich_instance_from_manifest(instance, manifest);
         if desired_state == DesiredServiceState::Running {
@@ -276,9 +288,11 @@ impl RuntimeControl {
     }
 
     pub async fn start(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        self.ensure_service_configuration_loaded(name)?;
         self.ensure_runtime_enabled(runtime)?;
         self.ensure_runtime_service(runtime, name).await?;
         match runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => {
                 self.docker_provider()?
                     .start(&self.docker_runtime_handle_or_name(name))
@@ -291,8 +305,10 @@ impl RuntimeControl {
     }
 
     pub async fn stop(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        self.ensure_service_configuration_loaded(name)?;
         let _ = self.ensure_runtime_service(runtime, name).await;
         let stop_result = match runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => {
                 self.docker_provider()?
                     .stop(&self.docker_runtime_handle_or_name(name))
@@ -319,7 +335,11 @@ impl RuntimeControl {
     }
 
     pub async fn remove(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        if self.service_state.lock().failed_service(name).is_some() {
+            return self.service_state.lock().remove_service(name);
+        }
         let remove_result = match runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => {
                 self.docker_provider()?
                     .remove(&self.docker_runtime_handle_or_name(name))
@@ -393,6 +413,7 @@ impl RuntimeControl {
         max_bytes: usize,
     ) -> Result<BoundedLogText> {
         let runtime = self.resolve_runtime(name)?;
+        self.ensure_service_configuration_loaded(name)?;
         self.ensure_runtime_enabled(runtime)?;
         self.ensure_runtime_service(runtime, name).await?;
         match runtime {
@@ -412,6 +433,7 @@ impl RuntimeControl {
             }
             RuntimeKind::Wasmtime => self.wasmtime.logs_text_bounded(name, tail, max_bytes),
             RuntimeKind::External => bail!("external TCP services do not have runtime logs"),
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
         }
     }
 
@@ -475,7 +497,7 @@ impl RuntimeControl {
             .cloned()
             .collect::<Vec<_>>();
 
-        let mut services = Vec::new();
+        let mut services = self.service_state.lock().failed_services();
         for manifest in manifests {
             let instance = match self.inspect(manifest.runtime, &manifest.name).await {
                 Ok(instance) => instance,
@@ -485,7 +507,10 @@ impl RuntimeControl {
                         manifest.name,
                         error
                     );
-                    missing_instance_from_manifest(&manifest)
+                    let mut instance = missing_instance_from_manifest(&manifest);
+                    instance.status =
+                        ServiceStatus::unknown().with_detail(format!("runtime error: {error:#}"));
+                    instance
                 }
             };
             services.push(enrich_instance_from_manifest(instance, &manifest));
@@ -496,6 +521,9 @@ impl RuntimeControl {
     }
 
     pub async fn inspect(&self, runtime: RuntimeKind, name: &str) -> Result<ServiceInstance> {
+        if let Some(failed) = self.service_state.lock().failed_service(name) {
+            return Ok(failed);
+        }
         if let Err(error) = self.ensure_runtime_service(runtime, name).await {
             if let Some(manifest) = self.get_service_manifest(name) {
                 log::warn!(
@@ -503,12 +531,16 @@ impl RuntimeControl {
                     name,
                     error
                 );
-                return Ok(missing_instance_from_manifest(&manifest));
+                let mut instance = missing_instance_from_manifest(&manifest);
+                instance.status =
+                    ServiceStatus::unknown().with_detail(format!("restore error: {error:#}"));
+                return Ok(instance);
             }
             return Err(error);
         }
 
         let inspect_result = match runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => {
                 self.docker_provider()?
                     .inspect(&self.docker_runtime_handle_or_name(name))
@@ -558,6 +590,7 @@ impl RuntimeControl {
         name: &str,
         options: &ServiceLogsOptions,
     ) -> Result<ServiceLogs> {
+        self.ensure_service_configuration_loaded(name)?;
         self.ensure_runtime_enabled(runtime)?;
         self.ensure_runtime_service(runtime, name).await?;
         match runtime {
@@ -568,6 +601,7 @@ impl RuntimeControl {
             }
             RuntimeKind::Wasmtime => self.wasmtime.logs(name, options).await,
             RuntimeKind::External => bail!("external TCP services do not have runtime logs"),
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
         }
     }
 
@@ -631,6 +665,7 @@ impl RuntimeControl {
 
     fn ensure_runtime_enabled(&self, runtime: RuntimeKind) -> Result<()> {
         match runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => {
                 if self.docker.is_none() {
                     bail!("docker runtime is not available");
@@ -654,6 +689,7 @@ impl RuntimeControl {
     }
 
     async fn ensure_runtime_service(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        self.ensure_service_configuration_loaded(name)?;
         if runtime != RuntimeKind::Wasmtime || self.wasmtime.has_service(name) {
             return Ok(());
         }
@@ -687,6 +723,9 @@ impl RuntimeControl {
     }
 
     fn resolve_runtime(&self, name: &str) -> Result<RuntimeKind> {
+        if let Some(failed) = self.service_state.lock().failed_service(name) {
+            return Ok(failed.runtime);
+        }
         self.service_index
             .lock()
             .get(name)
@@ -696,6 +735,13 @@ impl RuntimeControl {
 
     fn reserved_host_ports(&self) -> BTreeSet<u16> {
         self.reserved_host_ports_except("")
+    }
+
+    fn ensure_service_configuration_loaded(&self, name: &str) -> Result<()> {
+        if let Some(failed) = self.service_state.lock().failed_service(name) {
+            bail!("service '{}': {}", name, failed.status.state_label());
+        }
+        Ok(())
     }
 
     fn reserved_host_ports_except(&self, service_name: &str) -> BTreeSet<u16> {
@@ -709,6 +755,7 @@ impl RuntimeControl {
 
     async fn stop_runtime_only(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
         let stop_result = match runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => {
                 self.docker_provider()?
                     .stop(&self.docker_runtime_handle_or_name(name))
@@ -751,6 +798,7 @@ impl RuntimeControl {
         local_service_id: &str,
     ) -> Result<()> {
         let remove_result = match runtime {
+            RuntimeKind::Unknown => bail!("unknown service runtime"),
             RuntimeKind::Docker => self.docker_provider()?.remove(local_service_id).await,
             RuntimeKind::Wasmtime => {
                 self.wasmtime
@@ -805,19 +853,28 @@ fn ensure_definition_id_compatible(
     previous: &ServiceManifest,
     next: &ServiceManifest,
 ) -> Result<()> {
-    match (
+    ensure_matching_definition_id(
+        &next.name,
         previous.definition_id.as_deref(),
         next.definition_id.as_deref(),
-    ) {
+    )
+}
+
+fn ensure_matching_definition_id(
+    name: &str,
+    previous: Option<&str>,
+    next: Option<&str>,
+) -> Result<()> {
+    match (previous, next) {
         (Some(previous_id), Some(next_id)) if previous_id != next_id => bail!(
             "service '{}' was created from definition id '{}' and cannot be overwritten with definition id '{}'; use a different service name or remove the existing service first",
-            next.name,
+            name,
             previous_id,
             next_id
         ),
         (Some(previous_id), None) => bail!(
             "service '{}' was created from definition id '{}' and cannot be overwritten by a manifest without a definition id; use a matching .fungi.md service file or remove the existing service first",
-            next.name,
+            name,
             previous_id
         ),
         _ => Ok(()),
