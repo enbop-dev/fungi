@@ -23,12 +23,20 @@ impl ProcessId {
             .context("spawned process already exited")?;
         Ok(Self {
             pid,
-            started_at: start_identity(process)?,
+            started_at: start_identity(process)?.context("spawned process already exited")?,
         })
     }
 
     fn inspect(&self, exe: &Path, args: &[OsString]) -> Result<Option<System>> {
-        let system = System::new_all();
+        self.inspect_snapshot(System::new_all(), exe, args)
+    }
+
+    fn inspect_snapshot(
+        &self,
+        system: System,
+        exe: &Path,
+        args: &[OsString],
+    ) -> Result<Option<System>> {
         let Some(process) = system.process(Pid::from_u32(self.pid)) else {
             return Ok(None);
         };
@@ -42,7 +50,9 @@ impl ProcessId {
             || (cfg!(target_os = "linux") && process.exe() == Some(Path::new(&replaced_exe)));
         // Rebuilding a binary unlinks the old image on Linux. PID/start time
         // and exact arguments still identify that same running lab process.
-        let started_at = start_identity(process)?;
+        let Some(started_at) = start_identity(process)? else {
+            return Ok(None);
+        };
         if started_at != self.started_at
             || !executable_matches
             || !process.cmd().iter().skip(1).eq(args.iter())
@@ -84,22 +94,37 @@ impl ProcessId {
     }
 }
 
-fn start_identity(process: &sysinfo::Process) -> Result<u64> {
+fn start_identity(process: &sysinfo::Process) -> Result<Option<u64>> {
     #[cfg(target_os = "linux")]
     {
         // Use the kernel's start ticks, not an estimated wall-clock boot time
         // which can shift after a clock adjustment. stat field 22 follows comm.
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", process.pid()))?;
-        let fields = stat.rsplit_once(')').context("invalid process stat")?.1;
-        Ok(fields
-            .split_whitespace()
-            .nth(19)
-            .context("missing process start ticks")?
-            .parse()?)
+        let stat = match std::fs::read_to_string(format!("/proc/{}/stat", process.pid())) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut fields = stat
+            .rsplit_once(')')
+            .context("invalid process stat")?
+            .1
+            .split_whitespace();
+        // sysinfo reads status before exe/cmdline. A process can exit between
+        // those reads, leaving a live status with empty identity fields. Check
+        // its latest status here, alongside the start ticks, before rejecting it.
+        if matches!(fields.next().context("missing process status")?, "Z" | "X") {
+            return Ok(None);
+        }
+        Ok(Some(
+            fields
+                .nth(18)
+                .context("missing process start ticks")?
+                .parse()?,
+        ))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Ok(process.start_time())
+        Ok((process.status() != ProcessStatus::Zombie).then(|| process.start_time()))
     }
 }
 
@@ -149,5 +174,47 @@ impl Drop for ChildGuard {
         if let Err(error) = self.stop() {
             eprintln!("failed to reclaim child: {error:#}");
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_exit_during_inspection_overrides_the_earlier_live_snapshot() {
+        let exe = std::fs::canonicalize("/bin/sleep").unwrap();
+        let args = [OsString::from("60")];
+        let mut child = ChildGuard::spawn(Command::new(&exe).args(&args)).unwrap();
+        let id = ProcessId::capture(child.child().id()).unwrap();
+        let snapshot = System::new_all();
+        assert_ne!(
+            snapshot.process(Pid::from_u32(id.pid)).unwrap().status(),
+            ProcessStatus::Zombie
+        );
+        child.child().kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let current = System::new_all();
+            if current.process(Pid::from_u32(id.pid)).unwrap().status() == ProcessStatus::Zombie {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            id.inspect_snapshot(snapshot, &exe, &args)
+                .unwrap()
+                .is_none()
+        );
+        let zombie_snapshot = System::new_all();
+        child.stop().unwrap();
+        // The proc entry can also disappear between the snapshot and stat read.
+        assert!(
+            start_identity(zombie_snapshot.process(Pid::from_u32(id.pid)).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(!id.running(&exe, &args).unwrap());
     }
 }
