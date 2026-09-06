@@ -26,7 +26,7 @@ fn main() -> Result<()> {
                     )
                 })?;
             c.execute()
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                .map_err(|error| anyhow::Error::from_boxed(error.into_boxed_dyn_error()))?
         }
 
         // fungi commands
