@@ -12,7 +12,7 @@ use fungi_daemon::{
     service_manifest_with_instance_name,
 };
 use fungi_daemon_grpc::{
-    Request,
+    Request, decode_service_apply_failure_status,
     fungi_daemon_grpc::{
         AttachServiceAccessRequest, DetachServiceAccessRequest, DeviceInfo,
         DeviceServiceSnapshotRequest, Empty, GetRecipeRequest, GetServiceLogsRequest,
@@ -296,7 +296,7 @@ pub async fn execute_service(args: CommonArgs, service_args: ServiceArgs) {
             };
             match client.pull_service(Request::new(req)).await {
                 Ok(resp) => print_service_instance(resp.into_inner(), false),
-                Err(e) => fatal_grpc(e),
+                Err(error) => fatal_apply_grpc(error, None),
             }
         }
         ServiceCommands::Start { name } => {
@@ -879,7 +879,7 @@ async fn apply_service_from_recipe(
             Ok(resp) => {
                 finish_remote_apply(client, &device, resp.into_inner(), start).await;
             }
-            Err(error) => fatal_remote_device_grpc(error),
+            Err(error) => fatal_apply_grpc(error, Some(&device)),
         }
     } else {
         print_recipe_runtime_wait_notice(&detail);
@@ -891,7 +891,7 @@ async fn apply_service_from_recipe(
             Ok(resp) => {
                 finish_local_apply(client, resp.into_inner(), start).await;
             }
-            Err(error) => fatal_grpc(error),
+            Err(error) => fatal_apply_grpc(error, None),
         }
     }
 }
@@ -1079,6 +1079,7 @@ fn fallback_apply_outcome(status: ServiceStatus) -> ServiceApplyOutcome {
         manifest_change: ServiceManifestChange::Unknown,
         workload_action: ServiceWorkloadAction::Unknown,
         final_status: status,
+        failure: None,
     }
 }
 
@@ -1096,6 +1097,49 @@ fn print_service_apply_outcome(
     println!("Final phase: {}", outcome.final_status.phase);
     if let Some(detail) = outcome.final_status.detail.as_deref() {
         println!("Final detail: {detail}");
+    }
+}
+
+fn apply_failure_message(service_name: &str, outcome: &ServiceApplyOutcome) -> String {
+    let failure = outcome
+        .failure
+        .as_ref()
+        .expect("apply failure message requires a failed outcome");
+    format!(
+        "Service manifest applied for {service_name}, but {failure}. Final state: {}.",
+        outcome.final_status.state_label()
+    )
+}
+
+fn fatal_failed_apply(
+    service_name: &str,
+    device_name: Option<&str>,
+    outcome: &ServiceApplyOutcome,
+) -> ! {
+    print_service_apply_outcome(service_name, device_name, outcome);
+    let target = match device_name {
+        Some(device_name) => format!("{service_name}@{device_name}"),
+        None => service_name.to_string(),
+    };
+    fatal(apply_failure_message(&target, outcome))
+}
+
+fn fatal_apply_grpc(error: tonic::Status, device: Option<&super::shared::ResolvedPeerTarget>) -> ! {
+    if let Some(response) = decode_service_apply_failure_status(&error) {
+        let service_name = response
+            .service
+            .map(|service| service.name)
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let outcome = response
+            .apply_outcome
+            .expect("decoded partial apply status requires an outcome");
+        let device_name = device.map(resolved_device_display_name);
+        fatal_failed_apply(&service_name, device_name.as_deref(), &outcome);
+    }
+
+    match device {
+        Some(_) => fatal_remote_device_grpc(error),
+        None => fatal_grpc(error),
     }
 }
 
@@ -1158,6 +1202,10 @@ async fn finish_local_apply(
     let mut outcome =
         decoded_outcome.unwrap_or_else(|| fallback_apply_outcome(instance.status.clone()));
 
+    if outcome.failure.is_some() {
+        fatal_failed_apply(&service_name, None, &outcome);
+    }
+
     if start_requested {
         let was_running = outcome.final_status.is_running();
         let start_error = client
@@ -1216,6 +1264,11 @@ async fn finish_remote_apply(
             ),
         },
     };
+    let device_name = resolved_device_display_name(device);
+
+    if outcome.failure.is_some() {
+        fatal_failed_apply(&service_name, Some(&device_name), &outcome);
+    }
 
     if start_requested {
         let was_running = outcome.final_status.is_running();
@@ -1252,7 +1305,6 @@ async fn finish_remote_apply(
         }
     }
 
-    let device_name = resolved_device_display_name(device);
     print_service_apply_outcome(&service_name, Some(&device_name), &outcome);
     print_remote_apply_next_steps(&service_name, device, start_requested);
 }
@@ -1275,7 +1327,7 @@ async fn apply_created_service(
             Ok(resp) => {
                 finish_remote_apply(client, &device, resp.into_inner(), created.start_now).await;
             }
-            Err(error) => fatal_remote_device_grpc(error),
+            Err(error) => fatal_apply_grpc(error, Some(&device)),
         }
     } else {
         let req = PullServiceRequest {
@@ -1286,7 +1338,7 @@ async fn apply_created_service(
             Ok(resp) => {
                 finish_local_apply(client, resp.into_inner(), created.start_now).await;
             }
-            Err(error) => fatal_grpc(error),
+            Err(error) => fatal_apply_grpc(error, None),
         }
     }
 }
@@ -3111,6 +3163,25 @@ mod tests {
             &status,
             Some("listener synchronization failed")
         ));
+    }
+
+    #[test]
+    fn apply_failure_message_reports_internal_restart_and_final_state() {
+        let outcome = ServiceApplyOutcome {
+            manifest_change: ServiceManifestChange::Changed,
+            workload_action: ServiceWorkloadAction::None,
+            final_status: ServiceStatus::stopped(),
+            failure: Some(fungi_daemon::ServiceApplyFailure {
+                stage: fungi_daemon::ServiceApplyFailureStage::Restart,
+                message: "Failed to spawn fungi WASI process".to_string(),
+            }),
+        };
+
+        let message = apply_failure_message("demo", &outcome);
+
+        assert!(message.contains("Service manifest applied for demo"));
+        assert!(message.contains("restart failed"));
+        assert!(message.contains("Final state: stopped"));
     }
 
     #[test]

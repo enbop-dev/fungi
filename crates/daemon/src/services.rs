@@ -20,9 +20,9 @@ use crate::{
     },
     runtime::RuntimeControl,
     service_endpoints::{
-        sync_service_endpoint_listeners_by_name, sync_service_endpoint_listeners_for_manifest,
+        sync_applied_service_endpoint_listeners, sync_service_endpoint_listeners_by_name,
+        sync_service_endpoint_listeners_for_manifest,
     },
-    service_state::DesiredServiceState,
 };
 
 const REMOTE_SERVICE_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -337,10 +337,17 @@ impl DeviceServices {
         manifest_yaml: String,
         manifest_base_dir: Option<PathBuf>,
     ) -> Result<ServiceHandle> {
-        Ok(self
+        let applied = self
             .apply_manifest_yaml_with_outcome(manifest_yaml, manifest_base_dir)
-            .await?
-            .service)
+            .await?;
+        if let Some(message) = applied
+            .outcome
+            .as_ref()
+            .and_then(ServiceApplyOutcome::failure_summary)
+        {
+            anyhow::bail!(message);
+        }
+        Ok(applied.service)
     }
 
     pub(crate) async fn apply_manifest_yaml_with_outcome(
@@ -351,7 +358,7 @@ impl DeviceServices {
         if self.is_local() {
             let fungi_home = self.services.inner.fungi_dir.clone();
             let base_dir = manifest_base_dir.unwrap_or_else(|| fungi_home.clone());
-            let applied = self
+            let mut applied = self
                 .services
                 .inner
                 .local
@@ -363,33 +370,12 @@ impl DeviceServices {
                     &ManifestResolutionPolicy,
                 )
                 .await?;
-            if applied.desired_state == DesiredServiceState::Running {
-                sync_service_endpoint_listeners_for_manifest(
-                    &self.services.inner.local.tcp_tunneling,
-                    applied.previous_manifest.as_ref(),
-                    false,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "service manifest applied, but failed to update endpoint listeners; final phase: {}",
-                        applied.outcome.final_status.phase
-                    )
-                })?;
-                sync_service_endpoint_listeners_by_name(
-                    &self.services.inner.local.runtime,
-                    &self.services.inner.local.tcp_tunneling,
-                    &applied.instance.name,
-                    true,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "service manifest applied, but failed to publish endpoint listeners; final phase: {}",
-                        applied.outcome.final_status.phase
-                    )
-                })?;
-            }
+            sync_applied_service_endpoint_listeners(
+                &self.services.inner.local.runtime,
+                &self.services.inner.local.tcp_tunneling,
+                &mut applied,
+            )
+            .await;
             Ok(AppliedServiceHandle {
                 service: self.service(applied.instance.name),
                 outcome: Some(applied.outcome),

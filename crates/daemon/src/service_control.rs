@@ -87,20 +87,26 @@ impl ServiceControlResponse {
         }
     }
 
-    pub fn success_applied(
+    pub fn applied(
         request_id: Option<String>,
         service_name: String,
         apply_outcome: ServiceApplyOutcome,
     ) -> Self {
+        let error = apply_outcome
+            .failure_summary()
+            .map(|message| ServiceControlError {
+                code: "partial_apply".to_string(),
+                message,
+            });
         Self {
             request_id,
-            ok: true,
+            ok: error.is_none(),
             forgotten_locally: false,
             service: Some(ServiceControlServiceRef { name: service_name }),
             services_json: None,
             logs_text: None,
             apply_outcome: Some(apply_outcome),
-            error: None,
+            error,
         }
     }
 
@@ -170,6 +176,19 @@ impl ServiceControlResponse {
             anyhow::bail!("{}: {}", error.code, error.message)
         }
     }
+
+    pub fn into_apply_result(self) -> anyhow::Result<Self> {
+        if self.ok
+            || self
+                .apply_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.failure.is_some())
+        {
+            Ok(self)
+        } else {
+            self.into_result()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,18 +218,47 @@ mod tests {
 
     #[test]
     fn applied_response_round_trips_structured_outcome() {
-        let response = ServiceControlResponse::success_applied(
+        let response = ServiceControlResponse::applied(
             None,
             "demo".to_string(),
             ServiceApplyOutcome {
                 manifest_change: ServiceManifestChange::Unchanged,
                 workload_action: ServiceWorkloadAction::Restarted,
                 final_status: ServiceStatus::new(ServicePhase::Running),
+                failure: None,
             },
         );
 
         let encoded = serde_json::to_string(&response).unwrap();
         let decoded: ServiceControlResponse = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.apply_outcome, response.apply_outcome);
+    }
+
+    #[test]
+    fn partial_apply_response_preserves_remote_failure_details() {
+        let response = ServiceControlResponse::applied(
+            None,
+            "demo".to_string(),
+            ServiceApplyOutcome {
+                manifest_change: ServiceManifestChange::Changed,
+                workload_action: ServiceWorkloadAction::None,
+                final_status: ServiceStatus::stopped(),
+                failure: Some(crate::ServiceApplyFailure {
+                    stage: crate::ServiceApplyFailureStage::Restart,
+                    message: "launcher failed".to_string(),
+                }),
+            },
+        );
+
+        assert!(!response.ok);
+        assert_eq!(response.error.as_ref().unwrap().code, "partial_apply");
+
+        let encoded = serde_json::to_string(&response).unwrap();
+        let decoded: ServiceControlResponse = serde_json::from_str(&encoded).unwrap();
+        let preserved = decoded.into_apply_result().unwrap();
+        assert_eq!(
+            preserved.apply_outcome.unwrap().failure.unwrap().message,
+            "launcher failed"
+        );
     }
 }

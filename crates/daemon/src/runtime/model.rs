@@ -209,11 +209,62 @@ impl fmt::Display for ServiceWorkloadAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceApplyFailureStage {
+    Restart,
+    FinalInspection,
+    EndpointListeners,
+}
+
+impl fmt::Display for ServiceApplyFailureStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Restart => "restart",
+            Self::FinalInspection => "final inspection",
+            Self::EndpointListeners => "endpoint listener synchronization",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceApplyFailure {
+    pub stage: ServiceApplyFailureStage,
+    pub message: String,
+}
+
+impl fmt::Display for ServiceApplyFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} failed: {}", self.stage, self.message)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceApplyOutcome {
     pub manifest_change: ServiceManifestChange,
     pub workload_action: ServiceWorkloadAction,
     pub final_status: ServiceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ServiceApplyFailure>,
+}
+
+impl ServiceApplyOutcome {
+    pub fn record_failure(&mut self, stage: ServiceApplyFailureStage, message: impl Into<String>) {
+        self.failure = Some(ServiceApplyFailure {
+            stage,
+            message: message.into(),
+        });
+    }
+
+    pub fn failure_summary(&self) -> Option<String> {
+        self.failure.as_ref().map(|failure| {
+            format!(
+                "service manifest applied, but {failure}; final phase: {}",
+                self.final_status.phase
+            )
+        })
+    }
 }
 
 impl ServiceStatus {

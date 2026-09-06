@@ -40,12 +40,13 @@ pub use recipes::{
 pub use runtime::{
     AppliedService, DeviceService, DeviceServiceEndpoint, DeviceServiceMetadata,
     DeviceServiceSnapshot, ManifestResolutionPolicy, RuntimeControl, RuntimeKind,
-    ServiceApplyOutcome, ServiceExpose, ServiceExposeEndpointBinding, ServiceExposeTransport,
-    ServiceExposeTransportKind, ServiceExposeUsage, ServiceExposeUsageKind, ServiceInstance,
-    ServiceLogs, ServiceLogsOptions, ServiceManifest, ServiceManifestChange, ServiceMount,
-    ServicePhase, ServicePort, ServicePortAllocation, ServicePortProtocol, ServiceRunMode,
-    ServiceSource, ServiceStatus, ServiceWorkloadAction, load_service_manifest_yaml_file,
-    parse_service_manifest_yaml, peek_service_manifest_name, service_expose_endpoint_bindings,
+    ServiceApplyFailure, ServiceApplyFailureStage, ServiceApplyOutcome, ServiceExpose,
+    ServiceExposeEndpointBinding, ServiceExposeTransport, ServiceExposeTransportKind,
+    ServiceExposeUsage, ServiceExposeUsageKind, ServiceInstance, ServiceLogs, ServiceLogsOptions,
+    ServiceManifest, ServiceManifestChange, ServiceMount, ServicePhase, ServicePort,
+    ServicePortAllocation, ServicePortProtocol, ServiceRunMode, ServiceSource, ServiceStatus,
+    ServiceWorkloadAction, load_service_manifest_yaml_file, parse_service_manifest_yaml,
+    peek_service_manifest_name, service_expose_endpoint_bindings,
     service_manifest_with_instance_name,
 };
 pub use service_accesses::ServiceAccesses;

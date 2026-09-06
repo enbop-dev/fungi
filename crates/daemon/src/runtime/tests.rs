@@ -1100,6 +1100,78 @@ publish:
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_control_apply_reports_restart_failure_after_persisting_manifest() {
+    let temp_dir = TempDir::new().unwrap();
+    let fungi_home = temp_dir.path().join("fungi-home");
+    let component_v1 = temp_dir.path().join("component-v1.wasm");
+    let component_v2 = temp_dir.path().join("component-v2.wasm");
+    fs::write(&component_v1, b"wasm-v1").unwrap();
+    fs::write(&component_v2, b"wasm-v2").unwrap();
+    let launcher = create_fake_launcher(temp_dir.path()).unwrap();
+
+    let control = RuntimeControl::new(
+        fungi_home.join("runtime"),
+        launcher.clone(),
+        fungi_home.clone(),
+        None,
+        fungi_home.join("services"),
+        vec![temp_dir.path().to_path_buf()],
+        true,
+    )
+    .unwrap();
+
+    let manifest_v1 = wasmtime_manifest_yaml("demo", &component_v1, 19110);
+    control
+        .apply_manifest_yaml(
+            &manifest_v1,
+            temp_dir.path(),
+            &fungi_home,
+            &ManifestResolutionPolicy,
+        )
+        .await
+        .unwrap();
+    control.start_by_name("demo").await.unwrap();
+
+    let mut permissions = fs::metadata(&launcher).unwrap().permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(&launcher, permissions).unwrap();
+
+    let manifest_v2 = wasmtime_manifest_yaml("demo", &component_v2, 19110);
+    let applied = control
+        .apply_manifest_yaml(
+            &manifest_v2,
+            temp_dir.path(),
+            &fungi_home,
+            &ManifestResolutionPolicy,
+        )
+        .await
+        .expect("post-persist restart failure should return an apply outcome");
+
+    assert_eq!(
+        applied.outcome.manifest_change,
+        ServiceManifestChange::Changed
+    );
+    assert_eq!(applied.outcome.workload_action, ServiceWorkloadAction::None);
+    assert_eq!(applied.outcome.final_status.phase, ServicePhase::Stopped);
+    let failure = applied.outcome.failure.unwrap();
+    assert_eq!(failure.stage, ServiceApplyFailureStage::Restart);
+    assert!(
+        failure
+            .message
+            .contains("Failed to spawn fungi WASI process")
+    );
+    assert!(matches!(
+        control.get_service_manifest("demo").unwrap().source,
+        ServiceSource::WasmtimeFile { component } if component == component_v2
+    ));
+    assert_eq!(
+        control.inspect_by_name("demo").await.unwrap().status.phase,
+        ServicePhase::Stopped
+    );
+}
+
 #[tokio::test]
 async fn runtime_control_apply_uses_in_memory_manifest_when_persisted_state_is_missing() {
     let temp_dir = TempDir::new().unwrap();
