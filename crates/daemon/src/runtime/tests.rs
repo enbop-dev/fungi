@@ -1092,6 +1092,131 @@ publish:
 }
 
 #[tokio::test]
+async fn first_apply_persistence_failure_can_be_retried_without_restart() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let component = home.join("component.wasm");
+    fs::write(&component, b"component").unwrap();
+    let manifest = parse_service_manifest_yaml(&format!(
+        "fungi: service/v1\nid: retryable\nrun:\n  provider: wasmtime\n  source:\n    file: {}\npublish:\n  main:\n    tcp:\n      port: 8082\n", component.display()
+    ), home, home).unwrap();
+    let provider = WasmtimeRuntimeProvider::new(
+        home.join("runtime"),
+        create_fake_launcher(home).unwrap(),
+        home.to_path_buf(),
+        vec![home.to_path_buf()],
+    );
+    let services = home.join("services");
+    let control =
+        RuntimeControl::with_wasmtime_provider(provider.clone(), None, services.clone(), true)
+            .unwrap();
+
+    // A non-directory obstruction fails identically for root and non-root test runners.
+    fs::remove_dir(&services).unwrap();
+    fs::write(&services, b"blocked").unwrap();
+    let error = control.apply(&manifest).await.unwrap_err();
+    assert!(format!("{error:#}").contains("Failed to create managed service directory"));
+    assert!(!provider.has_service("retryable"));
+    assert!(control.list_services().await.unwrap().is_empty());
+    assert_eq!(
+        fs::read_dir(home.join("artifacts/services"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    fs::remove_file(&services).unwrap();
+    fs::create_dir(&services).unwrap();
+    control.apply(&manifest).await.unwrap();
+    control.start_by_name("retryable").await.unwrap();
+    assert!(
+        control
+            .inspect_by_name("retryable")
+            .await
+            .unwrap()
+            .status
+            .is_running()
+    );
+    control.remove_by_name("retryable").await.unwrap();
+    assert!(!provider.has_service("retryable"));
+}
+
+#[tokio::test]
+async fn failed_upgrade_restores_manifest_and_remains_retryable() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let component = home.join("component.wasm");
+    fs::write(&component, b"upgraded").unwrap();
+    let yaml = format!(
+        "fungi: service/v1\nid: demo\nrun:\n  provider: wasmtime\n  source:\n    file: {}\npublish:\n  main:\n    tcp:\n      port: 8082\n",
+        component.display()
+    );
+    let legacy = yaml.replace("  provider: wasmtime", "  provider: wasmtime\n  mode: http");
+    let saved = home.join("services/svc_old");
+    fs::create_dir_all(&saved).unwrap();
+    fs::write(saved.join("service.yaml"), &legacy).unwrap();
+    let old_state =
+        br#"{"schema_version":2,"local_service_id":"svc_old","desired_state":"running"}"#;
+    fs::write(saved.join("state.json"), old_state).unwrap();
+    let data = home.join("appdata/services/svc_old");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("keep.txt"), b"user data").unwrap();
+    let provider = WasmtimeRuntimeProvider::new(
+        home.join("runtime"),
+        create_fake_launcher(home).unwrap(),
+        home.to_path_buf(),
+        vec![home.to_path_buf()],
+    );
+    let control =
+        RuntimeControl::with_wasmtime_provider(provider.clone(), None, home.join("services"), true)
+            .unwrap();
+    control.restore_persisted_state().await.unwrap();
+
+    fs::rename(saved.join("state.json"), saved.join("state.backup")).unwrap();
+    fs::create_dir(saved.join("state.json")).unwrap();
+    let error = control
+        .apply_manifest_yaml(&yaml, home, home, &ManifestResolutionPolicy)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("Failed to persist service state file"));
+    assert_eq!(
+        fs::read_to_string(saved.join("service.yaml")).unwrap(),
+        legacy
+    );
+    assert!(!provider.has_service("demo"));
+    assert!(
+        control
+            .inspect_by_name("demo")
+            .await
+            .unwrap()
+            .status
+            .state_label()
+            .contains("configuration error")
+    );
+    assert!(control.start_by_name("demo").await.is_err());
+    assert_eq!(fs::read(data.join("keep.txt")).unwrap(), b"user data");
+
+    fs::remove_dir(saved.join("state.json")).unwrap();
+    fs::rename(saved.join("state.backup"), saved.join("state.json")).unwrap();
+    assert_eq!(fs::read(saved.join("state.json")).unwrap(), old_state);
+    control
+        .apply_manifest_yaml(&yaml, home, home, &ManifestResolutionPolicy)
+        .await
+        .unwrap();
+    control.start_by_name("demo").await.unwrap();
+    assert!(
+        control
+            .inspect_by_name("demo")
+            .await
+            .unwrap()
+            .status
+            .is_running()
+    );
+    control.remove_by_name("demo").await.unwrap();
+    assert_eq!(fs::read(data.join("keep.txt")).unwrap(), b"user data");
+}
+
+#[tokio::test]
 async fn invalid_persisted_services_are_isolated_and_can_be_upgraded_or_removed() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");

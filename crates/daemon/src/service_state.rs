@@ -297,8 +297,13 @@ impl ServiceStateStore {
             .state
             .get_mut(&local_service_id)
             .ok_or_else(|| anyhow::anyhow!("persisted service not found: {service_name}"))?;
+        let previous = service.desired_state;
         service.desired_state = desired_state;
-        self.save_service(&local_service_id)
+        if let Err(error) = self.save_service(&local_service_id) {
+            self.state.get_mut(&local_service_id).unwrap().desired_state = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn remove_service(&mut self, service_name: &str) -> Result<()> {
@@ -337,7 +342,15 @@ impl ServiceStateStore {
         self.ensure_service_appdata_dir(local_service_id)?;
 
         let manifest_yaml = service_manifest_to_yaml(&service.manifest)?;
-        atomic_write(&service_dir.join("service.yaml"), manifest_yaml.as_bytes())?;
+        let manifest_path = service_dir.join("service.yaml");
+        let previous_manifest = match fs::read(&manifest_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to back up {}", manifest_path.display()));
+            }
+        };
 
         let state_file = ServiceStateFile {
             configuration_error: None,
@@ -348,7 +361,21 @@ impl ServiceStateStore {
         };
         let state_bytes =
             serde_json::to_vec_pretty(&state_file).context("Failed to encode service state")?;
-        atomic_write(&service_dir.join("state.json"), &state_bytes)
+        atomic_write(&manifest_path, manifest_yaml.as_bytes())?;
+        if let Err(error) = atomic_write(&service_dir.join("state.json"), &state_bytes) {
+            let rollback = match previous_manifest {
+                Some(bytes) => atomic_write(&manifest_path, &bytes),
+                None => fs::remove_file(&manifest_path)
+                    .context("Failed to remove uncommitted service manifest"),
+            };
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => {
+                    Err(error.context(format!("Manifest rollback also failed: {rollback_error:#}")))
+                }
+            };
+        }
+        Ok(())
     }
 
     fn service_dir(&self, local_service_id: &str) -> PathBuf {

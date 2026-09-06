@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use anyhow::{Result, bail};
@@ -34,6 +34,15 @@ pub struct RuntimeControl {
     service_index: Arc<Mutex<HashMap<String, RuntimeKind>>>,
     service_manifests: Arc<Mutex<HashMap<String, ServiceManifest>>>,
     service_state: Arc<Mutex<ServiceStateStore>>,
+    service_operations: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    pending_cleanup: Arc<Mutex<HashMap<String, PendingRuntimeCleanup>>>,
+}
+
+#[derive(Clone)]
+struct PendingRuntimeCleanup {
+    local_service_id: String,
+    instance: ServiceInstance,
+    apply_error: String,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +75,8 @@ impl RuntimeControl {
             service_index: Arc::new(Mutex::new(HashMap::new())),
             service_manifests: Arc::new(Mutex::new(HashMap::new())),
             service_state: Arc::new(Mutex::new(ServiceStateStore::load(service_state_file)?)),
+            service_operations: Arc::default(),
+            pending_cleanup: Arc::default(),
         })
     }
 
@@ -82,6 +93,8 @@ impl RuntimeControl {
             service_index: Arc::new(Mutex::new(HashMap::new())),
             service_manifests: Arc::new(Mutex::new(HashMap::new())),
             service_state: Arc::new(Mutex::new(ServiceStateStore::load(service_state_file)?)),
+            service_operations: Arc::default(),
+            pending_cleanup: Arc::default(),
         })
     }
 
@@ -99,13 +112,11 @@ impl RuntimeControl {
     }
 
     pub async fn pull(&self, manifest: &ServiceManifest) -> Result<ServiceInstance> {
-        Ok(self
-            .apply_with_local_service_id(manifest, None)
-            .await?
-            .instance)
+        Ok(self.apply(manifest).await?.instance)
     }
 
     pub async fn apply(&self, manifest: &ServiceManifest) -> Result<AppliedService> {
+        let _operation = self.lock_service_operation(&manifest.name).await;
         self.apply_with_local_service_id(manifest, None).await
     }
 
@@ -125,6 +136,7 @@ impl RuntimeControl {
         local_service_id: Option<&str>,
     ) -> Result<AppliedService> {
         self.ensure_runtime_enabled(manifest.runtime)?;
+        self.retry_pending_cleanup(&manifest.name).await?;
 
         let previous_service = { self.service_state.lock().persisted_service(&manifest.name) };
         let failed_service = { self.service_state.lock().failed_service(&manifest.name) };
@@ -210,7 +222,27 @@ impl RuntimeControl {
             RuntimeKind::External => Ok(self.external_instance_from_manifest(manifest, false)),
         }?;
 
-        self.persist_service(manifest, desired_state, Some(&resolved_local_service_id))?;
+        if let Err(error) =
+            self.persist_service(manifest, desired_state, Some(&resolved_local_service_id))
+        {
+            let mut failed = enrich_instance_from_manifest(instance, manifest);
+            failed.status =
+                ServiceStatus::unknown().with_detail(format!("apply persistence error: {error:#}"));
+            self.pending_cleanup.lock().insert(
+                manifest.name.clone(),
+                PendingRuntimeCleanup {
+                    local_service_id: resolved_local_service_id,
+                    instance: failed,
+                    apply_error: format!("{error:#}"),
+                },
+            );
+            return match self.retry_pending_cleanup(&manifest.name).await {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => {
+                    Err(error.context(format!("Runtime rollback also failed: {cleanup_error:#}")))
+                }
+            };
+        }
         self.service_index
             .lock()
             .insert(manifest.name.clone(), manifest.runtime);
@@ -220,8 +252,10 @@ impl RuntimeControl {
 
         let mut instance = enrich_instance_from_manifest(instance, manifest);
         if desired_state == DesiredServiceState::Running {
-            self.start(manifest.runtime, &manifest.name).await?;
-            instance = self.inspect(manifest.runtime, &manifest.name).await?;
+            self.start_locked(manifest.runtime, &manifest.name).await?;
+            instance = self
+                .inspect_locked(manifest.runtime, &manifest.name)
+                .await?;
         }
 
         Ok(AppliedService {
@@ -239,6 +273,7 @@ impl RuntimeControl {
         policy: &ManifestResolutionPolicy,
     ) -> Result<AppliedService> {
         let manifest_name = peek_service_manifest_name(content)?;
+        let _operation = self.lock_service_operation(&manifest_name).await;
         let local_service_id = {
             self.service_state
                 .lock()
@@ -288,6 +323,11 @@ impl RuntimeControl {
     }
 
     pub async fn start(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        let _operation = self.lock_service_operation(name).await;
+        self.start_locked(runtime, name).await
+    }
+
+    async fn start_locked(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
         self.ensure_service_configuration_loaded(name)?;
         self.ensure_runtime_enabled(runtime)?;
         self.ensure_runtime_service(runtime, name).await?;
@@ -305,6 +345,11 @@ impl RuntimeControl {
     }
 
     pub async fn stop(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        let _operation = self.lock_service_operation(name).await;
+        self.stop_locked(runtime, name).await
+    }
+
+    async fn stop_locked(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
         self.ensure_service_configuration_loaded(name)?;
         let _ = self.ensure_runtime_service(runtime, name).await;
         let stop_result = match runtime {
@@ -335,8 +380,20 @@ impl RuntimeControl {
     }
 
     pub async fn remove(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        let _operation = self.lock_service_operation(name).await;
+        self.remove_locked(runtime, name).await
+    }
+
+    async fn remove_locked(&self, runtime: RuntimeKind, name: &str) -> Result<()> {
+        let had_pending_cleanup = self.pending_cleanup.lock().contains_key(name);
+        self.retry_pending_cleanup(name).await?;
         if self.service_state.lock().failed_service(name).is_some() {
             return self.service_state.lock().remove_service(name);
+        }
+        if had_pending_cleanup && self.service_state.lock().persisted_service(name).is_none() {
+            self.service_index.lock().remove(name);
+            self.service_manifests.lock().remove(name);
+            return Ok(());
         }
         let remove_result = match runtime {
             RuntimeKind::Unknown => bail!("unknown service runtime"),
@@ -374,8 +431,9 @@ impl RuntimeControl {
     }
 
     pub async fn start_by_name(&self, name: &str) -> Result<()> {
+        let _operation = self.lock_service_operation(name).await;
         let runtime = self.resolve_runtime(name)?;
-        self.start(runtime, name).await
+        self.start_locked(runtime, name).await
     }
 
     pub fn get_service_manifest(&self, name: &str) -> Option<ServiceManifest> {
@@ -383,18 +441,21 @@ impl RuntimeControl {
     }
 
     pub async fn stop_by_name(&self, name: &str) -> Result<()> {
+        let _operation = self.lock_service_operation(name).await;
         let runtime = self.resolve_runtime(name)?;
-        self.stop(runtime, name).await
+        self.stop_locked(runtime, name).await
     }
 
     pub async fn remove_by_name(&self, name: &str) -> Result<()> {
+        let _operation = self.lock_service_operation(name).await;
         let runtime = self.resolve_runtime(name)?;
-        self.remove(runtime, name).await
+        self.remove_locked(runtime, name).await
     }
 
     pub async fn inspect_by_name(&self, name: &str) -> Result<ServiceInstance> {
+        let _operation = self.lock_service_operation(name).await;
         let runtime = self.resolve_runtime(name)?;
-        self.inspect(runtime, name).await
+        self.inspect_locked(runtime, name).await
     }
 
     pub async fn logs_by_name(
@@ -402,8 +463,9 @@ impl RuntimeControl {
         name: &str,
         options: &ServiceLogsOptions,
     ) -> Result<ServiceLogs> {
+        let _operation = self.lock_service_operation(name).await;
         let runtime = self.resolve_runtime(name)?;
-        self.logs(runtime, name, options).await
+        self.logs_locked(runtime, name, options).await
     }
 
     pub(crate) async fn logs_text_by_name_bounded(
@@ -412,6 +474,7 @@ impl RuntimeControl {
         tail: usize,
         max_bytes: usize,
     ) -> Result<BoundedLogText> {
+        let _operation = self.lock_service_operation(name).await;
         let runtime = self.resolve_runtime(name)?;
         self.ensure_service_configuration_loaded(name)?;
         self.ensure_runtime_enabled(runtime)?;
@@ -516,11 +579,24 @@ impl RuntimeControl {
             services.push(enrich_instance_from_manifest(instance, &manifest));
         }
 
+        for pending in self.pending_cleanup.lock().values() {
+            services.retain(|service| service.name != pending.instance.name);
+            services.push(pending.instance.clone());
+        }
+
         services.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(services)
     }
 
     pub async fn inspect(&self, runtime: RuntimeKind, name: &str) -> Result<ServiceInstance> {
+        let _operation = self.lock_service_operation(name).await;
+        self.inspect_locked(runtime, name).await
+    }
+
+    async fn inspect_locked(&self, runtime: RuntimeKind, name: &str) -> Result<ServiceInstance> {
+        if let Some(pending) = self.pending_cleanup.lock().get(name) {
+            return Ok(pending.instance.clone());
+        }
         if let Some(failed) = self.service_state.lock().failed_service(name) {
             return Ok(failed);
         }
@@ -585,6 +661,16 @@ impl RuntimeControl {
     }
 
     pub async fn logs(
+        &self,
+        runtime: RuntimeKind,
+        name: &str,
+        options: &ServiceLogsOptions,
+    ) -> Result<ServiceLogs> {
+        let _operation = self.lock_service_operation(name).await;
+        self.logs_locked(runtime, name, options).await
+    }
+
+    async fn logs_locked(
         &self,
         runtime: RuntimeKind,
         name: &str,
@@ -723,6 +809,9 @@ impl RuntimeControl {
     }
 
     fn resolve_runtime(&self, name: &str) -> Result<RuntimeKind> {
+        if let Some(pending) = self.pending_cleanup.lock().get(name) {
+            return Ok(pending.instance.runtime);
+        }
         if let Some(failed) = self.service_state.lock().failed_service(name) {
             return Ok(failed.runtime);
         }
@@ -738,8 +827,51 @@ impl RuntimeControl {
     }
 
     fn ensure_service_configuration_loaded(&self, name: &str) -> Result<()> {
+        if let Some(pending) = self.pending_cleanup.lock().get(name) {
+            bail!(
+                "service '{}': {}",
+                name,
+                pending.instance.status.state_label()
+            );
+        }
         if let Some(failed) = self.service_state.lock().failed_service(name) {
             bail!("service '{}': {}", name, failed.status.state_label());
+        }
+        Ok(())
+    }
+
+    async fn lock_service_operation(&self, name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let operation = {
+            let mut operations = self.service_operations.lock();
+            operations.retain(|_, operation| operation.strong_count() > 0);
+            match operations.get(name).and_then(Weak::upgrade) {
+                Some(operation) => operation,
+                None => {
+                    let operation = Arc::new(tokio::sync::Mutex::new(()));
+                    operations.insert(name.to_string(), Arc::downgrade(&operation));
+                    operation
+                }
+            }
+        };
+        operation.lock_owned().await
+    }
+
+    async fn retry_pending_cleanup(&self, name: &str) -> Result<()> {
+        let pending = { self.pending_cleanup.lock().get(name).cloned() };
+        if let Some(pending) = pending {
+            if let Err(error) = self
+                .remove_runtime_only(pending.instance.runtime, name, &pending.local_service_id)
+                .await
+            {
+                let mut failed = pending;
+                failed.instance.status = ServiceStatus::unknown().with_detail(format!(
+                    "apply persistence error: {}; runtime cleanup error: {error:#}; fix the filesystem/runtime problem and retry apply or remove",
+                    failed.apply_error,
+                ));
+                self.pending_cleanup.lock().insert(name.to_string(), failed);
+                return Err(error);
+            }
+            self.pending_cleanup.lock().remove(name);
         }
         Ok(())
     }
@@ -878,5 +1010,116 @@ fn ensure_matching_definition_id(
             previous_id
         ),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn cleanup_failure_remains_visible_and_allows_retry_or_remove() {
+        for retry_apply in [true, false] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let home = temp.path();
+            fs::write(home.join("component.wasm"), b"component").unwrap();
+            let manifest = super::super::parse_service_manifest_yaml(
+                "fungi: service/v1\nid: demo\nrun:\n  provider: wasmtime\n  source:\n    file: component.wasm\npublish:\n  main:\n    tcp:\n      port: 8082\n", home, home,
+            ).unwrap();
+            let provider = WasmtimeRuntimeProvider::new(
+                home.join("runtime"),
+                PathBuf::from("unused"),
+                home.to_path_buf(),
+                vec![home.to_path_buf()],
+            );
+            let control = RuntimeControl::with_wasmtime_provider(
+                provider.clone(),
+                None,
+                home.join("services"),
+                true,
+            )
+            .unwrap();
+            let instance = provider
+                .pull_with_local_service_id(&manifest, "svc_pending")
+                .await
+                .unwrap();
+            // Replay the state immediately after registration succeeds and persistence fails.
+            control.pending_cleanup.lock().insert(
+                "demo".to_string(),
+                PendingRuntimeCleanup {
+                    local_service_id: "svc_pending".into(),
+                    instance,
+                    apply_error: "test persistence failure".into(),
+                },
+            );
+            if !retry_apply {
+                control.seed_in_memory_service_for_test(manifest.clone());
+            }
+            let artifacts = home.join("artifacts/services/svc_pending");
+            fs::remove_file(artifacts.join("component.wasm")).unwrap();
+            fs::remove_dir(&artifacts).unwrap();
+            fs::write(&artifacts, b"blocked").unwrap();
+            assert!(control.remove_by_name("demo").await.is_err());
+            assert!(!provider.has_service("demo"));
+            let listed = control.list_services().await.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert!(
+                listed[0]
+                    .status
+                    .state_label()
+                    .contains("runtime cleanup error")
+            );
+            assert_eq!(
+                control.inspect_by_name("demo").await.unwrap().status.phase,
+                ServicePhase::Unknown
+            );
+            assert!(control.start_by_name("demo").await.is_err());
+
+            fs::remove_file(&artifacts).unwrap();
+            if retry_apply {
+                control.apply(&manifest).await.unwrap();
+                assert!(provider.has_service("demo"));
+                assert!(control.pending_cleanup.lock().is_empty());
+            }
+            control.remove_by_name("demo").await.unwrap();
+            assert!(control.list_services().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn service_operation_serialization_does_not_block_other_services() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path();
+        let control = RuntimeControl::new(
+            home.join("runtime"),
+            PathBuf::from("unused"),
+            home.to_path_buf(),
+            None,
+            home.join("services"),
+            vec![],
+            false,
+        )
+        .unwrap();
+        let manifest = super::super::parse_service_manifest_yaml(
+            "fungi: service/v1\nid: demo\npublish:\n  main:\n    tcp:\n      port: 54321\n",
+            home,
+            home,
+        )
+        .unwrap();
+        let operation = control.lock_service_operation("demo").await;
+        let apply = control.apply(&manifest);
+        tokio::pin!(apply);
+        tokio::select! {
+            biased;
+            result = &mut apply => panic!("apply bypassed the service operation lock: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        let mut other = manifest.clone();
+        other.name = "other".into();
+        control.apply(&other).await.unwrap();
+        drop(operation);
+        apply.await.unwrap();
+        assert_eq!(control.list_services().await.unwrap().len(), 2);
     }
 }

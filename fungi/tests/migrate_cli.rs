@@ -411,6 +411,44 @@ fn current_fungi_bin() -> &'static Path {
 }
 
 #[test]
+fn cli_apply_recovers_after_persistence_failure_without_daemon_restart() {
+    let home = TempDir::new().unwrap();
+    let binary = current_fungi_bin();
+    run_cli(binary, home.path(), &["init"]);
+    let component = home.path().join("component.wasm");
+    fs::write(&component, b"component used only for apply").unwrap();
+    let manifest = home.path().join("retryable.yaml");
+    fs::write(&manifest, format!(
+        "fungi: service/v1\nid: retryable\nrun:\n  provider: wasmtime\n  source:\n    file: {}\npublish:\n  main:\n    tcp:\n      port: {}\n",
+        component.display(), reserve_tcp_port()
+    )).unwrap();
+    let _daemon = start_daemon(binary, home.path());
+    let services = home.path().join("services");
+    fs::remove_dir(&services).unwrap();
+    fs::write(&services, b"blocked").unwrap();
+    let apply_args = [
+        "service",
+        "apply",
+        "retryable",
+        manifest.to_str().unwrap(),
+        "--yes",
+    ];
+    assert!(try_run_cli(binary, home.path(), &apply_args).is_none());
+    assert!(try_run_cli(binary, home.path(), &["service", "inspect", "retryable"]).is_none());
+    fs::remove_file(&services).unwrap();
+    fs::create_dir(&services).unwrap();
+    run_cli(binary, home.path(), &apply_args);
+    let inspect = run_cli(binary, home.path(), &["service", "inspect", "retryable"]);
+    assert!(
+        inspect.stdout.contains("\"phase\": \"stopped\""),
+        "{}",
+        inspect.stdout
+    );
+    run_cli(binary, home.path(), &["service", "remove", "retryable"]);
+    assert_eq!(fs::read_dir(&services).unwrap().count(), 0);
+}
+
+#[test]
 fn cli_keeps_legacy_http_services_manageable_after_upgrade() {
     for legacy_layout in [false, true] {
         let home = TempDir::new().unwrap();
